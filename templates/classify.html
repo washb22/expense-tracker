@@ -4,6 +4,88 @@
 
 {% block content %}
 <style>
+    /* 파일 업로드 가이드 스타일 */
+    .excel-example {
+        background-color: #f8f9fa;
+        color: #333;
+        border-radius: 8px;
+        overflow: hidden;
+        margin: 15px 0;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+    .excel-header {
+        background: linear-gradient(135deg, #28a745, #20c997);
+        color: white;
+        padding: 12px;
+        font-weight: bold;
+        text-align: center;
+    }
+    .excel-table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+    .excel-table th {
+        background-color: #e9ecef;
+        padding: 12px;
+        text-align: center;
+        border-right: 1px solid #dee2e6;
+        font-weight: bold;
+        color: #495057;
+    }
+    .excel-table th:last-child { border-right: none; }
+    .excel-table td {
+        padding: 10px;
+        text-align: center;
+        border-right: 1px solid #dee2e6;
+        border-bottom: 1px solid #dee2e6;
+        background-color: #ffffff;
+        color: #333;
+    }
+    .excel-table td:last-child { border-right: none; }
+    .format-options {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 10px;
+    }
+    .format-tag {
+        background-color: rgba(0, 166, 218, 0.2);
+        color: #00a6da;
+        padding: 4px 10px;
+        border-radius: 15px;
+        font-size: 0.85em;
+        border: 1px solid #00a6da;
+    }
+    .warning-list {
+        list-style: none;
+        padding: 0;
+        margin: 15px 0;
+    }
+    .warning-list li {
+        margin: 8px 0;
+        padding: 12px;
+        background-color: rgba(255,193,7,0.1);
+        border-radius: 6px;
+        border-left: 3px solid #ffc107;
+        color: #333;
+    }
+    .code {
+        background-color: rgba(255,255,255,0.2);
+        padding: 3px 8px;
+        border-radius: 4px;
+        font-family: 'Consolas', 'Monaco', monospace;
+        font-size: 0.9em;
+    }
+    .alert-info-custom {
+        background: linear-gradient(135deg, #2c5aa0, #1e3a5f);
+        border-left: 4px solid #00a6da;
+        color: white;
+    }
+    .alert-warning-custom {
+        background: linear-gradient(135deg, #d4a743, #b8941e);
+        color: #1e1e1e;
+        border-left: 4px solid #ffc107;
+    }
     /* 버튼 필터를 위한 스타일 */
     .filter-group {
         display: flex;
@@ -16,6 +98,22 @@
         margin-right: 15px;
         font-size: 1.1em;
     }
+    .btn-sm { padding: 5px 10px; font-size: 0.9em; }
+    .modal {
+        display: none; position: fixed; z-index: 1000;
+        left: 0; top: 0; width: 100%; height: 100%;
+        overflow: auto; background-color: rgba(0,0,0,0.7);
+    }
+    .modal-content {
+        background-color: var(--card-bg); margin: 10% auto;
+        padding: 30px; border: 1px solid var(--border-color);
+        width: 90%; max-width: 500px; border-radius: 12px;
+        position: relative;
+    }
+    .close-button {
+        color: #aaa; position: absolute; top: 15px; right: 25px;
+        font-size: 28px; font-weight: bold; cursor: pointer;
+    }
 </style>
 
 <div class="header">
@@ -25,6 +123,90 @@
 
 <div class="card">
     <h3>새 거래내역 업로드</h3>
+    
+    <!-- 파일 형식 안내 -->
+    <div class="alert alert-info-custom" style="padding: 15px; border-radius: 8px; margin-bottom: 15px;">
+        <div style="display: flex; align-items: center; margin-bottom: 10px;">
+            <span style="font-size: 1.2em; margin-right: 8px;">📋</span>
+            <strong>엑셀 파일 형식 안내</strong>
+        </div>
+        
+        <div class="excel-example">
+            <div class="excel-header">Excel 파일 예시</div>
+            <table class="excel-table">
+                <thead>
+                    <tr>
+                        <th>거래일시</th>
+                        <th>거래처</th>
+                        <th>출금액</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>2025-01-15</td>
+                        <td>스타벅스 강남점</td>
+                        <td>4500</td>
+                    </tr>
+                    <tr>
+                        <td>2025-01-16</td>
+                        <td>GS25 편의점</td>
+                        <td>12000</td>
+                    </tr>
+                    <tr>
+                        <td>2025-01-17</td>
+                        <td>맥도날드</td>
+                        <td>8900</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        
+        <div style="margin-top: 15px;">
+            <strong>인식 가능한 열 제목들:</strong>
+            <div class="format-options">
+                <span class="format-tag">거래일시</span>
+                <span class="format-tag">거래일자</span>
+                <span class="format-tag">사용일</span>
+                <span class="format-tag">거래처</span>
+                <span class="format-tag">거래내용</span>
+                <span class="format-tag">가맹점명</span>
+                <span class="format-tag">출금액</span>
+                <span class="format-tag">사용금액</span>
+                <span class="format-tag">거래금액</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- 주의사항 -->
+    <div class="alert alert-warning-custom" style="padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+        <div style="display: flex; align-items: center; margin-bottom: 10px;">
+            <span style="font-size: 1.2em; margin-right: 8px;">⚠️</span>
+            <strong>업로드 전 확인사항</strong>
+        </div>
+        
+        <ul class="warning-list">
+            <li>
+                <strong>날짜 형식:</strong> 
+                <span class="code">YYYY-MM-DD</span> 또는 
+                <span class="code">YYYY/MM/DD</span> 형태로 입력
+                <br><small>예: 2025-01-15, 2025/01/15</small>
+            </li>
+            <li>
+                <strong>금액 입력:</strong> 
+                숫자만 입력하세요 (콤마 있어도 자동 처리됩니다)
+                <br><small>예: 4500, 12,000, 1234567</small>
+            </li>
+            <li>
+                <strong>헤더 필수:</strong> 
+                첫 번째 행은 반드시 열 제목이어야 합니다
+            </li>
+            <li>
+                <strong>파일 형식:</strong> 
+                Excel (.xlsx) 또는 CSV (.csv) 파일만 지원
+            </li>
+        </ul>
+    </div>
+    
     <form method="POST" action="{{ url_for('show_results') }}" enctype="multipart/form-data">
         <div class="form-group">
             <label for="file">엑셀(xlsx) 또는 CSV 파일</label>
@@ -132,25 +314,6 @@
         </form>
     </div>
 </div>
-
-<style>
-    .btn-sm { padding: 5px 10px; font-size: 0.9em; }
-    .modal {
-        display: none; position: fixed; z-index: 1000;
-        left: 0; top: 0; width: 100%; height: 100%;
-        overflow: auto; background-color: rgba(0,0,0,0.7);
-    }
-    .modal-content {
-        background-color: var(--card-bg); margin: 10% auto;
-        padding: 30px; border: 1px solid var(--border-color);
-        width: 90%; max-width: 500px; border-radius: 12px;
-        position: relative;
-    }
-    .close-button {
-        color: #aaa; position: absolute; top: 15px; right: 25px;
-        font-size: 28px; font-weight: bold; cursor: pointer;
-    }
-</style>
 
 <script>
 document.addEventListener('DOMContentLoaded', function() {
