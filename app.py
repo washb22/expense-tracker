@@ -19,20 +19,31 @@ load_dotenv()
 app = Flask(__name__)
 app.secret_key = 'supersecretkey'
 
-# ⭐️⭐️⭐️ 이 부분이 Render 배포를 위해 수정되었습니다 ⭐️⭐️⭐️
-# Render에서 제공하는 데이터 저장 공간 경로 확인
-RENDER_DATABASE_DIR = '/var/data/render'
-if os.path.exists(RENDER_DATABASE_DIR):
-    # Render 환경일 경우, 지정된 경로에 DB 생성
-    db_path = os.path.join(RENDER_DATABASE_DIR, 'tracker.db')
-    app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{db_path}'
-else:
-    # 로컬 환경일 경우, 기존 방식대로 instance 폴더에 DB 생성
+#⭐️⭐️⭐️ 데이터베이스 경로 설정 함수 (수정됨) ⭐️⭐️⭐️
+def get_database_url():
+    # 환경변수에서 DATABASE_URL을 확인 (Render에서 자동 제공될 수 있음)
+    database_url = os.getenv('DATABASE_URL')
+    if database_url:
+        return database_url
+    
+    # Render의 지속 데이터 디렉토리 확인
+    render_dirs = ['/var/data', '/opt/render/project/data', '/data']
+    for render_dir in render_dirs:
+        if os.path.exists(render_dir):
+            db_path = os.path.join(render_dir, 'tracker.db')
+            return f'sqlite:///{db_path}'
+    
+    # 로컬 개발 환경용 (instance 폴더)
     instance_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance')
     os.makedirs(instance_path, exist_ok=True)
-    app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{os.path.join(instance_path, "tracker.db")}'
+    db_path = os.path.join(instance_path, 'tracker.db')
+    return f'sqlite:///{db_path}'
 
+# 데이터베이스 URI 설정
+app.config['SQLALCHEMY_DATABASE_URI'] = get_database_url()
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+print(f"Database URI: {app.config['SQLALCHEMY_DATABASE_URI']}")  # 디버깅용
 
 # .env 파일에서 비밀 키를 읽어오도록 변경
 app.config['GOOGLE_CLIENT_ID'] = os.getenv('GOOGLE_CLIENT_ID')
@@ -556,5 +567,32 @@ def export_excel():
         download_name=f'{filename}.xlsx'
     )
 
+# ⭐️⭐️⭐️ 앱 시작 전에 데이터베이스 초기화 (수정됨) ⭐️⭐️⭐️
+with app.app_context():
+    try:
+        # 데이터베이스 테이블 생성
+        db.create_all()
+        print("데이터베이스 테이블이 생성되었습니다.")
+        
+        # 테스트 사용자가 없으면 생성
+        if not User.query.filter_by(username='testuser').first():
+            test_user = User(
+                username='testuser',
+                email='test@example.com',
+                password_hash=generate_password_hash('password')
+            )
+            db.session.add(test_user)
+            db.session.commit()
+
+            # 기본 프로필 생성
+            default_profile = Profile(name="기본 프로필", user_id=test_user.id)
+            db.session.add(default_profile)
+            db.session.commit()
+            print("기본 사용자와 프로필이 생성되었습니다.")
+    except Exception as e:
+        print(f"데이터베이스 초기화 오류: {e}")
+
 if __name__ == '__main__':
-    app.run(debug=True)
+    # 로컬 개발용
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
