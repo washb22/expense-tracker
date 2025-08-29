@@ -21,22 +21,30 @@ app.secret_key = 'supersecretkey'
 
 #⭐️⭐️⭐️ 데이터베이스 경로 설정 함수 (수정됨) ⭐️⭐️⭐️
 def get_database_url():
-    # 환경변수에서 DATABASE_URL을 확인 (Render에서 자동 제공될 수 있음)
+    # 환경변수에서 DATABASE_URL을 확인
     database_url = os.getenv('DATABASE_URL')
     if database_url:
         return database_url
     
-    # Render의 지속 데이터 디렉토리 확인
-    render_dirs = ['/var/data', '/opt/render/project/data', '/data']
-    for render_dir in render_dirs:
-        if os.path.exists(render_dir):
-            db_path = os.path.join(render_dir, 'tracker.db')
+    # Render 디스크의 실제 마운트 경로 확인 (/var/data/render)
+    if os.path.exists('/var/data/render'):
+        db_path = '/var/data/render/tracker.db'
+        print(f"Using Render persistent disk: {db_path}")
+        return f'sqlite:///{db_path}'
+    
+    # 기타 가능한 Render 경로들
+    render_paths = ['/var/data', '/opt/render/project/data', '/data']
+    for render_path in render_paths:
+        if os.path.exists(render_path):
+            db_path = os.path.join(render_path, 'tracker.db')
+            print(f"Using render directory: {db_path}")
             return f'sqlite:///{db_path}'
     
-    # 로컬 개발 환경용 (instance 폴더)
+    # 로컬 개발 환경용
     instance_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance')
     os.makedirs(instance_path, exist_ok=True)
     db_path = os.path.join(instance_path, 'tracker.db')
+    print(f"Using local instance: {db_path}")
     return f'sqlite:///{db_path}'
 
 # 데이터베이스 URI 설정
