@@ -1,0 +1,64 @@
+{% extends "layout.html" %}
+
+{% block title %}카테고리 설정{% endblock %}
+
+{% block content %}
+<div class="header">
+    <h1>카테고리 설정</h1>
+    <p>거래처명에 포함될 키워드를 등록하여 카테고리를 자동으로 분류하세요.</p>
+</div>
+
+<!-- 새 규칙 추가 -->
+<div class="rule-section">
+    <h3>새 규칙 추가</h3>
+    <form method="post" action="{{ url_for('manage_rules') }}" class="simple-form">
+        <div class="form-row">
+            <label for="keyword">키워드</label>
+            <input type="text" name="keyword" id="keyword" placeholder="예: 스타벅스, GS25">
+        </div>
+        <div class="form-row">
+            <label for="category">카테고리</label>
+            <input type="text" name="category" id="category" placeholder="예: 식비, 편의점">
+        </div>
+        <button type="submit" class="btn btn-primary">규칙 추가</button>
+    </form>
+</div>
+
+<!-- 현재 규칙 목록 -->
+<div class="rule-section mt-4">
+    <h3>현재 규칙 목록</h3>
+    <div class="rule-list-header">
+        <div class="rule-col">키워드</div>
+        <div class="rule-col">지정 카테고리</div>
+        <div class="rule-col">삭제</div>
+    </div>
+    <ul class="rule-list">
+        {% for rule in rules %}
+        <li class="rule-item">
+            <div class="rule-col">{{ rule.keyword }}</div>
+            <div class="rule-col">{{ rule.category }}</div>
+            <div class="rule-col">
+                <form action="{{ url_for('delete_rule', rule_id=rule.id) }}" method="post" style="display:inline;">
+                    <button type="submit" class="btn btn-danger btn-sm" onclick="return confirm('정말 이 규칙을 삭제하시겠습니까?');">삭제</button>
+                </form>
+            </div>
+        </li>
+        {% else %}
+        <li class="rule-item-empty">
+            아직 등록된 규칙이 없습니다.
+        </li>
+        {% endfor %}
+    </ul>
+</div>
+
+<!-- 전체 데이터 재분류 기능 -->
+<div class="rule-section mt-4">
+    <h3>데이터 관리</h3>
+    <p style="color: var(--text-muted); font-size: 0.9em;">
+        새로운 규칙을 만들거나 수정한 후, 이 버튼을 눌러 저장된 모든 거래 내역에 새 규칙을 적용하세요.
+    </p>
+    <form method="post" action="{{ url_for('reclassify_all_data') }}" class="mt-3">
+        <button type="submit" class="btn btn-success">🔄 전체 데이터 재분류</button>
+    </form>
+</div>
+{% endblock %}

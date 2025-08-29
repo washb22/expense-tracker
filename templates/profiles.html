@@ -1,0 +1,50 @@
+{% extends "layout.html" %}
+
+{% block title %}프로필 관리{% endblock %}
+
+{% block content %}
+<div class="header">
+    <h1>프로필 관리</h1>
+    <p>여러 회사의 재무 데이터를 관리하기 위한 프로필을 생성하고 선택하세요.</p>
+</div>
+
+<div class="card">
+    <h3>새 프로필 추가</h3>
+    <form method="post" action="{{ url_for('add_profile') }}" class="simple-form">
+        <div class="form-row">
+            <label for="profile_name">프로필 이름</label>
+            <input type="text" name="profile_name" id="profile_name" placeholder="예: 1회사, 개인용" required>
+        </div>
+        <button type="submit" class="btn btn-primary">프로필 추가</button>
+    </form>
+</div>
+
+<div class="card mt-4">
+    <h3>프로필 목록</h3>
+    {% if profiles %}
+    <ul class="list-group">
+        {% for profile in profiles %}
+        <!-- ⭐️⭐️⭐️ 이 부분이 수정되었습니다 ⭐️⭐️⭐️ -->
+        <li class="list-group-item">
+            <div class="profile-info">
+                <span class="profile-name">{{ profile.name }}</span>
+                {% if active_profile and active_profile.id == profile.id %}
+                    <span class="badge bg-primary">활성</span>
+                {% endif %}
+            </div>
+            <div class="profile-actions">
+                <a href="{{ url_for('select_profile', profile_id=profile.id) }}" class="btn btn-sm btn-success">선택</a>
+                <form action="{{ url_for('delete_profile', profile_id=profile.id) }}" method="post" style="display:inline;" onsubmit="return confirm('정말 이 프로필과 모든 데이터를 삭제하시겠습니까?');">
+                    <button type="submit" class="btn btn-sm btn-danger">삭제</button>
+                </form>
+            </div>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p>생성된 프로필이 없습니다. 위에서 새 프로필을 추가해주세요.</p>
+    {% endif %}
+</div>
+
+<!-- ⭐️⭐️⭐️ 기존 스타일 블록이 CSS 파일로 이동하면서 삭제됩니다 ⭐️⭐️⭐️ -->
+{% endblock %}

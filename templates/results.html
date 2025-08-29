@@ -1,0 +1,139 @@
+{% extends "layout.html" %}
+
+{% block title %}거래내역 분석 - Finance Tracker{% endblock %}
+
+{% block content %}
+<style>
+    .category-filters {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.8rem;
+        margin-bottom: 2rem;
+        padding-bottom: 1.5rem;
+        border-bottom: 1px solid var(--border-color);
+    }
+    .analysis-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 2rem;
+        margin-top: 2rem;
+    }
+    .chart-container {
+        background-color: #1e1e1e;
+        padding: 2rem;
+        border-radius: 12px;
+        height: 450px;
+    }
+</style>
+
+<h2>거래내역 분석</h2>
+
+<!-- 카테고리 필터 버튼 -->
+<div class="category-filters">
+    <a href="{{ url_for('show_results') }}" class="btn btn-primary" style="background-color: {{ '#6a5acd' if not selected_category else '#555' }};">전체 보기</a>
+    {% for category in all_categories %}
+        <a href="{{ url_for('show_results', category=category) }}" class="btn btn-primary" style="background-color: {{ '#6a5acd' if category == selected_category else '#555' }};">{{ category }}</a>
+    {% endfor %}
+</div>
+
+
+{% if selected_category and chart_data %}
+    <!-- 카테고리 선택 시: 상세 분석 뷰 -->
+    <h3>'{{ selected_category }}' 카테고리 상세 분석</h3>
+    <div class="analysis-grid">
+        <div class="chart-container">
+            <h4 style="margin-bottom: 1.5rem;">거래처별 지출 현황</h4>
+            <canvas id="categoryChart"></canvas>
+        </div>
+        <div class="table-container">
+            <!-- 상세 내역 테이블 -->
+            <table class="table">
+                <thead>
+                    <tr>
+                        {% for header in headers %}{% if header in ['거래일시', '거래처', '출금액'] %}<th>{{ header }}</th>{% endif %}{% endfor %}
+                        <th>관리</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for t in transactions %}
+                    <tr>
+                        {% for header in headers %}{% if header in ['거래일시', '거래처', '출금액'] %}<td>{{ t[header] }}</td>{% endif %}{% endfor %}
+                        <td>
+                            <form action="{{ url_for('delete_transaction', item_index=t['original_index']) }}" method="post" onsubmit="return confirm('정말 이 항목을 삭제하시겠습니까?');">
+                                <button type="submit" class="btn btn-danger" style="background-color: #dc3545; padding: 0.25rem 0.5rem; font-size: 0.8rem;">삭제</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+{% else %}
+    <!-- 기본 (전체) 뷰 -->
+    <table class="table">
+        <thead>
+            <tr>
+                {% for header in headers %}<th>{{ header }}</th>{% endfor %}
+                <th>관리</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for t in transactions %}
+            <tr>
+                {% for header in headers %}<td>{{ t[header] }}</td>{% endfor %}
+                <td>
+                    <form action="{{ url_for('delete_transaction', item_index=t['original_index']) }}" method="post" onsubmit="return confirm('정말 이 항목을 삭제하시겠습니까?');">
+                        <button type="submit" class="btn btn-danger" style="background-color: #dc3545; padding: 0.25rem 0.5rem; font-size: 0.8rem;">삭제</button>
+                    </form>
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="{{ headers|length + 1 }}" style="text-align: center; padding: 2rem;">표시할 데이터가 없습니다.</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+{% endif %}
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+{% if chart_data %}
+    const ctx = document.getElementById('categoryChart').getContext('2d');
+    const chartData = {{ chart_data | tojson | safe }};
+
+    new Chart(ctx, {
+        type: 'bar', // 막대 그래프
+        data: {
+            labels: chartData.labels,
+            datasets: [{
+                label: '지출 금액',
+                data: chartData.data,
+                backgroundColor: 'rgba(106, 90, 205, 0.7)',
+                borderColor: 'rgba(106, 90, 205, 1)',
+                borderWidth: 1
+            }]
+        },
+        options: {
+            indexAxis: 'y', // 가로 막대 그래프
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false }
+            },
+            scales: {
+                x: {
+                    ticks: { color: '#e0e0e0' }
+                },
+                y: {
+                    ticks: { color: '#e0e0e0' }
+                }
+            }
+        }
+    });
+{% endif %}
+</script>
+
+{% endblock %}

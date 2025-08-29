@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}머니로그(MoneyLog){% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <aside class="sidebar">
+            <h1 class="logo">MoneyLog</h1>
+            
+            {% if current_user.is_authenticated %}
+            <div class="profile-selector">
+                <div class="dropdown">
+                    <button class="btn btn-secondary dropdown-toggle" type="button">
+                        {{ active_profile.name if active_profile else '프로필 선택' }}
+                    </button>
+                    <div class="dropdown-menu">
+                        {% for profile in profiles %}
+                        <a class="dropdown-item" href="{{ url_for('select_profile', profile_id=profile.id) }}">{{ profile.name }}</a>
+                        {% endfor %}
+                        <hr class="dropdown-divider">
+                        <a class="dropdown-item" href="{{ url_for('manage_profiles') }}">⚙️ 프로필 관리</a>
+                    </div>
+                </div>
+            </div>
+            <style>
+                .profile-selector { margin-bottom: 25px; position: relative; }
+                .dropdown-toggle { 
+                    width: 100%; 
+                    background-color: var(--card-bg); 
+                    border: 1px solid var(--border-color); 
+                    text-align: left; 
+                    padding: 10px 15px; 
+                    cursor: pointer; 
+                    color: var(--text-color);
+                }
+                .dropdown-menu {
+                    display: none;
+                    position: absolute; width: 100%; background-color: var(--card-bg);
+                    border: 1px solid var(--border-color); border-radius: 8px;
+                    margin-top: 5px; z-index: 100; box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+                }
+                .dropdown-menu.show { display: block; }
+                .dropdown-item { display: block; padding: 10px 15px; color: var(--text-muted); text-decoration: none; transition: background-color 0.2s; }
+                .dropdown-item:hover { background-color: var(--active-color); color: var(--text-color); }
+                .dropdown-divider { height: 1px; margin: 0.5rem 0; overflow: hidden; background-color: var(--border-color); border: 0; }
+            </style>
+            <script>
+                document.addEventListener('DOMContentLoaded', function() {
+                    const dropdownToggle = document.querySelector('.dropdown-toggle');
+                    const dropdownMenu = document.querySelector('.dropdown-menu');
+
+                    if (dropdownToggle) {
+                        dropdownToggle.addEventListener('click', function(event) {
+                            event.stopPropagation();
+                            dropdownMenu.classList.toggle('show');
+                        });
+                    }
+
+                    window.addEventListener('click', function(event) {
+                        if (dropdownMenu && !dropdownMenu.contains(event.target) && !dropdownToggle.contains(event.target)) {
+                            dropdownMenu.classList.remove('show');
+                        }
+                    });
+                });
+            </script>
+            {% endif %}
+
+            <nav class="sidebar-nav">
+                <ul>
+                    {% if current_user.is_authenticated %}
+                        <li><a href="{{ url_for('index') }}" class="{{ 'active' if active_page == 'dashboard' else '' }}">대시보드</a></li>
+                        <li><a href="{{ url_for('show_results') }}" class="{{ 'active' if active_page == 'classify' else '' }}">거래내역 분류</a></li>
+                        <li><a href="{{ url_for('manage_rules') }}" class="{{ 'active' if active_page == 'rules' else '' }}">카테고리 설정</a></li>
+                        <li><a href="{{ url_for('logout') }}">로그아웃</a></li>
+                    {% else %}
+                        <li><a href="{{ url_for('login') }}">로그인</a></li>
+                        <li><a href="{{ url_for('register') }}">회원가입</a></li>
+                    {% endif %}
+                </ul>
+            </nav>
+        </aside>
+
+        <main>
+            {% with messages = get_flashed_messages(with_categories=true) %}
+              {% if messages %}
+                <div class="flash-messages">
+                {% for category, message in messages %}
+                  <div class="alert alert-{{ category }}">{{ message }}</div>
+                {% endfor %}
+                </div>
+              {% endif %}
+            {% endwith %}
+            
+            {% block content %}{% endblock %}
+        </main>
+    </div>
+</body>
+</html>
