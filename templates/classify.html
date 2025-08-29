@@ -114,6 +114,49 @@
         color: #aaa; position: absolute; top: 15px; right: 25px;
         font-size: 28px; font-weight: bold; cursor: pointer;
     }
+    /* 알림 메시지 스타일 */
+    .toast-notification {
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        z-index: 9999;
+        padding: 15px 20px;
+        border-radius: 8px;
+        color: white;
+        font-weight: bold;
+        opacity: 0;
+        transform: translateX(100%);
+        transition: all 0.3s ease;
+    }
+    .toast-notification.show {
+        opacity: 1;
+        transform: translateX(0);
+    }
+    .toast-success {
+        background-color: #28a745;
+    }
+    .toast-error {
+        background-color: #dc3545;
+    }
+    /* 로딩 스피너 */
+    .loading-spinner {
+        display: none;
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 9999;
+        width: 50px;
+        height: 50px;
+        border: 5px solid #f3f3f3;
+        border-top: 5px solid #00a6da;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+    }
+    @keyframes spin {
+        0% { transform: translate(-50%, -50%) rotate(0deg); }
+        100% { transform: translate(-50%, -50%) rotate(360deg); }
+    }
 </style>
 
 <div class="header">
@@ -216,8 +259,8 @@
         <div class="form-group" style="display: flex; gap: 10px; margin-top: 1.5rem;">
             <button type="submit" name="action" value="append" class="btn btn-success">파일 추가</button>
             <button type="submit" name="action" value="upload" class="btn btn-danger" 
-                    onclick="return confirm('정말 기존의 모든 데이터를 삭제하고 새로 업로드하시겠습니까? 이 작업은 되돌릴 수 없습니다.');">
-                전체 삭제
+                    onclick="return confirm('기존 데이터를 모두 삭제하고 새 파일로 교체하시겠습니까? 이 작업은 되돌릴 수 없습니다.');">
+                전체 교체
             </button>
         </div>
     </form>
@@ -229,61 +272,82 @@
     <div style="margin-bottom: 1.5rem;">
         <div class="filter-group" style="margin-bottom: 15px;">
             <span class="filter-group-title">월별:</span>
-            <a href="{{ url_for('show_results', category_filter=active_filter) }}" class="btn btn-sm {{ 'btn-active' if not selected_month else 'btn-secondary' }}">전체</a>
+            <button class="btn btn-sm filter-btn month-filter {{ 'btn-active' if not selected_month else 'btn-secondary' }}" 
+                    data-type="month" data-value="">전체</button>
             {% for month in available_months %}
-            <a href="{{ url_for('show_results', month_filter=month, category_filter=active_filter) }}" class="btn btn-sm {{ 'btn-active' if month == selected_month else 'btn-secondary' }}">{{ month }}</a>
+            <button class="btn btn-sm filter-btn month-filter {{ 'btn-active' if month == selected_month else 'btn-secondary' }}" 
+                    data-type="month" data-value="{{ month }}">{{ month }}</button>
             {% endfor %}
         </div>
         <div class="filter-group">
             <span class="filter-group-title">카테고리:</span>
-            <a href="{{ url_for('show_results', month_filter=selected_month) }}" class="btn btn-sm {{ 'btn-active' if not active_filter else 'btn-secondary' }}">전체</a>
+            <button class="btn btn-sm filter-btn category-filter {{ 'btn-active' if not active_filter else 'btn-secondary' }}" 
+                    data-type="category" data-value="">전체</button>
             {% for category in unique_categories %}
-            <a href="{{ url_for('show_results', month_filter=selected_month, category_filter=category) }}" class="btn btn-sm {{ 'btn-active' if category == active_filter else 'btn-secondary' }}">{{ category }}</a>
+            <button class="btn btn-sm filter-btn category-filter {{ 'btn-active' if category == active_filter else 'btn-secondary' }}" 
+                    data-type="category" data-value="{{ category }}">{{ category }}</button>
             {% endfor %}
         </div>
     </div>
 
-    <div class="table-responsive" style="margin-top: 20px;">
-        <table class="table">
-            <thead>
-                <tr>
-                    <th>날짜</th>
-                    <th>거래처명</th>
-                    <th>금액</th>
-                    <th>카테고리</th>
-                    <th style="text-align: right;">관리</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for record in records %}
-                <tr id="record-{{ record.id }}">
-                    <td data-label="날짜">{{ record['날짜'] }}</td>
-                    <td data-label="거래처명">{{ record['거래처명'] }}</td>
-                    <td data-label="금액">{{ '{:,.0f}'.format(record['금액']) }} 원</td>
-                    <td data-label="카테고리">{{ record['카테고리'] }}</td>
-                    <td style="text-align: right; white-space: nowrap;">
-                        <button class="btn btn-primary btn-sm edit-btn"
-                                data-id="{{ record.id }}"
-                                data-date="{{ record['날짜'] }}"
-                                data-merchant="{{ record['거래처명'] }}"
-                                data-amount="{{ record['금액'] }}"
-                                data-category="{{ record['카테고리'] }}">
-                            수정
-                        </button>
-                        <form action="{{ url_for('delete_item', item_id=record.id) }}" method="post" style="display: inline-block; margin-left: 5px;">
-                            <input type="hidden" name="month_filter" value="{{ selected_month or '' }}">
-                            <input type="hidden" name="category_filter" value="{{ active_filter or '' }}">
-                            <button type="submit" class="btn btn-danger btn-sm" onclick="return confirm('정말 이 항목을 삭제하시겠습니까?');">삭제</button>
-                        </form>
-                    </td>
-                </tr>
-                {% else %}
-                <tr>
-                    <td colspan="5" style="text-align: center; padding: 20px;">표시할 데이터가 없습니다.</td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
+    <!-- 전체선택/선택삭제 버튼 추가 (테이블 위에) -->
+    <div style="margin-bottom: 15px;">
+        <button type="button" id="select-all-btn" class="btn btn-secondary btn-sm">전체선택</button>
+        <button type="button" id="delete-selected-btn" class="btn btn-danger btn-sm" style="margin-left: 10px;">선택삭제</button>
+        <span id="selected-count" style="margin-left: 15px; color: #ccc;">선택된 항목: 0개</span>
+    </div>
+
+    <div id="table-container">
+        <div class="table-responsive" style="margin-top: 20px;">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th style="width: 40px;">
+                            <input type="checkbox" id="master-checkbox">
+                        </th>
+                        <th>날짜</th>
+                        <th>거래처명</th>
+                        <th>금액</th>
+                        <th>카테고리</th>
+                        <th style="text-align: right;">관리</th>
+                    </tr>
+                </thead>
+                <tbody id="records-tbody">
+                    {% for record in records %}
+                    <tr id="record-{{ record.id }}">
+                        <td>
+                            <input type="checkbox" class="record-checkbox" value="{{ record.id }}">
+                        </td>
+                        <td data-label="날짜">{{ record['날짜'] }}</td>
+                        <td data-label="거래처명">{{ record['거래처명'] }}</td>
+                        <td data-label="금액">{{ '{:,.0f}'.format(record['금액']) }} 원</td>
+                        <td data-label="카테고리">{{ record['카테고리'] }}</td>
+                        <td style="text-align: right; white-space: nowrap;">
+                            <button class="btn btn-primary btn-sm edit-btn"
+                                    data-id="{{ record.id }}"
+                                    data-date="{{ record['날짜'] }}"
+                                    data-merchant="{{ record['거래처명'] }}"
+                                    data-amount="{{ record['금액'] }}"
+                                    data-category="{{ record['카테고리'] }}">
+                                수정
+                            </button>
+                            <button class="btn btn-danger btn-sm single-delete-btn" 
+                                    data-id="{{ record.id }}"
+                                    data-month="{{ selected_month or '' }}"
+                                    data-category="{{ active_filter or '' }}"
+                                    style="margin-left: 5px;">
+                                삭제
+                            </button>
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="6" style="text-align: center; padding: 20px;">표시할 데이터가 없습니다.</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
     </div>
 </div>
 
@@ -315,30 +379,187 @@
     </div>
 </div>
 
+<!-- 로딩 스피너 -->
+<div id="loading-spinner" class="loading-spinner"></div>
+
 <script>
 document.addEventListener('DOMContentLoaded', function() {
-    const modal = document.getElementById('edit-modal');
-    const closeButton = document.querySelector('.close-button');
-    const editForm = document.getElementById('edit-form');
-    
-    document.querySelectorAll('.edit-btn').forEach(button => {
+    let currentMonthFilter = '{{ selected_month or "" }}';
+    let currentCategoryFilter = '{{ active_filter or "" }}';
+
+    // 알림 메시지 표시 함수
+    function showToast(message, type = 'success') {
+        const toast = document.createElement('div');
+        toast.className = `toast-notification toast-${type}`;
+        toast.textContent = message;
+        document.body.appendChild(toast);
+        
+        setTimeout(() => toast.classList.add('show'), 100);
+        setTimeout(() => {
+            toast.classList.remove('show');
+            setTimeout(() => toast.remove(), 300);
+        }, 3000);
+    }
+
+    // 로딩 스피너 함수
+    function showLoading() {
+        document.getElementById('loading-spinner').style.display = 'block';
+    }
+
+    function hideLoading() {
+        document.getElementById('loading-spinner').style.display = 'none';
+    }
+
+    // 필터 버튼 클릭 처리
+    function handleFilterClick(button) {
+        const filterType = button.dataset.type;
+        const filterValue = button.dataset.value;
+
+        // 현재 필터 상태 업데이트
+        if (filterType === 'month') {
+            currentMonthFilter = filterValue;
+        } else if (filterType === 'category') {
+            currentCategoryFilter = filterValue;
+        }
+
+        // 버튼 활성화 상태 업데이트
+        if (filterType === 'month') {
+            document.querySelectorAll('.month-filter').forEach(btn => {
+                btn.classList.remove('btn-active');
+                btn.classList.add('btn-secondary');
+            });
+        } else {
+            document.querySelectorAll('.category-filter').forEach(btn => {
+                btn.classList.remove('btn-active');
+                btn.classList.add('btn-secondary');
+            });
+        }
+        
+        button.classList.remove('btn-secondary');
+        button.classList.add('btn-active');
+
+        // AJAX로 필터링된 데이터 로드
+        loadFilteredData();
+    }
+
+    // 필터링된 데이터 로드 함수
+    function loadFilteredData() {
+        showLoading();
+        
+        const url = new URL('/classify', window.location.origin);
+        if (currentMonthFilter) url.searchParams.set('month_filter', currentMonthFilter);
+        if (currentCategoryFilter) url.searchParams.set('category_filter', currentCategoryFilter);
+
+        fetch(url)
+            .then(response => response.text())
+            .then(html => {
+                // 새 HTML에서 테이블 부분만 추출
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(html, 'text/html');
+                const newTbody = doc.querySelector('#records-tbody');
+                
+                if (newTbody) {
+                    document.querySelector('#records-tbody').innerHTML = newTbody.innerHTML;
+                    
+                    // 이벤트 리스너 다시 바인딩
+                    bindEventListeners();
+                    updateSelectedCount();
+                }
+                hideLoading();
+            })
+            .catch(error => {
+                hideLoading();
+                showToast('데이터 로드 중 오류가 발생했습니다.', 'error');
+            });
+    }
+
+    // 이벤트 리스너 바인딩 함수
+    function bindEventListeners() {
+        // 수정 버튼 이벤트
+        document.querySelectorAll('.edit-btn').forEach(button => {
+            button.addEventListener('click', function() {
+                const id = this.dataset.id;
+                const date = this.dataset.date;
+                const merchant = this.dataset.merchant;
+                const amount = this.dataset.amount;
+                const category = this.dataset.category;
+
+                document.getElementById('edit-form').action = `/edit_transaction/${id}`;
+                document.getElementById('edit-date').value = date;
+                document.getElementById('edit-merchant').value = merchant;
+                document.getElementById('edit-amount').value = amount;
+                document.getElementById('edit-category').value = category;
+
+                document.getElementById('edit-modal').style.display = 'block';
+            });
+        });
+
+        // 개별 삭제 버튼 이벤트
+        document.querySelectorAll('.single-delete-btn').forEach(button => {
+            button.addEventListener('click', function() {
+                if (!confirm('정말 이 항목을 삭제하시겠습니까?')) {
+                    return;
+                }
+
+                const itemId = this.dataset.id;
+                fetch(`/delete_item/${itemId}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: `month_filter=${currentMonthFilter}&category_filter=${currentCategoryFilter}`
+                })
+                .then(response => {
+                    if (response.ok) {
+                        const row = document.getElementById(`record-${itemId}`);
+                        if (row) row.remove();
+                        updateSelectedCount();
+                        showToast('항목이 삭제되었습니다.');
+                    } else {
+                        showToast('삭제 중 오류가 발생했습니다.', 'error');
+                    }
+                })
+                .catch(error => {
+                    showToast('삭제 중 오류가 발생했습니다.', 'error');
+                });
+            });
+        });
+
+        // 체크박스 이벤트
+        const recordCheckboxes = document.querySelectorAll('.record-checkbox');
+        recordCheckboxes.forEach(checkbox => {
+            checkbox.addEventListener('change', function() {
+                const allChecked = Array.from(recordCheckboxes).every(cb => cb.checked);
+                const anyChecked = Array.from(recordCheckboxes).some(cb => cb.checked);
+                
+                const masterCheckbox = document.getElementById('master-checkbox');
+                if (masterCheckbox) {
+                    masterCheckbox.checked = allChecked;
+                    masterCheckbox.indeterminate = anyChecked && !allChecked;
+                }
+                updateSelectedCount();
+            });
+        });
+    }
+
+    // 선택된 항목 수 업데이트
+    function updateSelectedCount() {
+        const checkedBoxes = document.querySelectorAll('.record-checkbox:checked');
+        document.getElementById('selected-count').textContent = `선택된 항목: ${checkedBoxes.length}개`;
+        document.getElementById('delete-selected-btn').disabled = checkedBoxes.length === 0;
+    }
+
+    // 초기 이벤트 리스너 설정
+    // 필터 버튼들
+    document.querySelectorAll('.filter-btn').forEach(button => {
         button.addEventListener('click', function() {
-            const id = this.dataset.id;
-            const date = this.dataset.date;
-            const merchant = this.dataset.merchant;
-            const amount = this.dataset.amount;
-            const category = this.dataset.category;
-
-            editForm.action = `/edit_transaction/${id}`;
-
-            document.getElementById('edit-date').value = date;
-            document.getElementById('edit-merchant').value = merchant;
-            document.getElementById('edit-amount').value = amount;
-            document.getElementById('edit-category').value = category;
-
-            modal.style.display = 'block';
+            handleFilterClick(this);
         });
     });
+
+    // 기존 수정 모달 기능
+    const modal = document.getElementById('edit-modal');
+    const closeButton = document.querySelector('.close-button');
 
     closeButton.onclick = function() {
         modal.style.display = 'none';
@@ -349,6 +570,79 @@ document.addEventListener('DOMContentLoaded', function() {
             modal.style.display = 'none';
         }
     }
+
+    // 마스터 체크박스
+    const masterCheckbox = document.getElementById('master-checkbox');
+    if (masterCheckbox) {
+        masterCheckbox.addEventListener('change', function() {
+            document.querySelectorAll('.record-checkbox').forEach(checkbox => {
+                checkbox.checked = this.checked;
+            });
+            updateSelectedCount();
+        });
+    }
+
+    // 전체선택 버튼
+    document.getElementById('select-all-btn').addEventListener('click', function() {
+        const recordCheckboxes = document.querySelectorAll('.record-checkbox');
+        const allChecked = Array.from(recordCheckboxes).every(cb => cb.checked);
+        recordCheckboxes.forEach(checkbox => {
+            checkbox.checked = !allChecked;
+        });
+        if (masterCheckbox) {
+            masterCheckbox.checked = !allChecked;
+            masterCheckbox.indeterminate = false;
+        }
+        updateSelectedCount();
+        this.textContent = allChecked ? '전체선택' : '선택해제';
+    });
+
+    // 선택삭제 버튼
+    document.getElementById('delete-selected-btn').addEventListener('click', function() {
+        const checkedBoxes = document.querySelectorAll('.record-checkbox:checked');
+        if (checkedBoxes.length === 0) {
+            alert('삭제할 항목을 선택해주세요.');
+            return;
+        }
+
+        if (!confirm(`선택한 ${checkedBoxes.length}개 항목을 삭제하시겠습니까?`)) {
+            return;
+        }
+
+        const idsToDelete = Array.from(checkedBoxes).map(cb => cb.value);
+        
+        fetch('/delete_multiple', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                ids: idsToDelete,
+                month_filter: currentMonthFilter,
+                category_filter: currentCategoryFilter
+            })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                idsToDelete.forEach(id => {
+                    const row = document.getElementById(`record-${id}`);
+                    if (row) row.remove();
+                });
+                updateSelectedCount();
+                showToast(`${idsToDelete.length}개 항목이 삭제되었습니다.`);
+            } else {
+                showToast('삭제 중 오류가 발생했습니다: ' + data.message, 'error');
+            }
+        })
+        .catch(error => {
+            showToast('삭제 중 오류가 발생했습니다.', 'error');
+        });
+    });
+
+    // 초기 이벤트 바인딩 및 상태 설정
+    bindEventListeners();
+    updateSelectedCount();
 });
 </script>
 {% endblock %}

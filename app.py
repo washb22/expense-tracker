@@ -365,22 +365,47 @@ def show_results():
                 return redirect(url_for('show_results'))
 
             action = request.form.get('action', 'append')
-            if action == 'upload':
-                Transaction.query.filter_by(profile_id=profile_id).delete()
-                flash('기존 모든 데이터가 삭제되었습니다.', 'info')
-            for _, row in classified_df.iterrows():
-                transaction = Transaction(
-                    date=row['날짜'],
-                    merchant=row['거래처명'],
-                    amount=row['금액'],
-                    category=row['카테고리'],
-                    profile_id=profile_id
-                )
-                db.session.add(transaction)
-            db.session.commit()
-            flash('데이터가 성공적으로 처리되었습니다!', 'success')
+            if action == 'upload':  # 전체 삭제
+                try:
+                    # 현재 프로필의 거래내역만 삭제
+                    transactions_to_delete = Transaction.query.filter_by(profile_id=profile_id).all()
+                    deleted_count = len(transactions_to_delete)
+                    
+                    for transaction in transactions_to_delete:
+                        db.session.delete(transaction)
+                    
+                    db.session.commit()
+                    flash(f'기존 {deleted_count}개의 데이터가 삭제되었습니다.', 'info')
+                    
+                except Exception as delete_error:
+                    db.session.rollback()
+                    flash(f'데이터 삭제 중 오류 발생: {str(delete_error)}', 'error')
+                    return redirect(url_for('show_results'))
+            
+            # 새 데이터 추가
+            try:
+                added_count = 0
+                for _, row in classified_df.iterrows():
+                    transaction = Transaction(
+                        date=row['날짜'],
+                        merchant=row['거래처명'],
+                        amount=row['금액'],
+                        category=row['카테고리'],
+                        profile_id=profile_id
+                    )
+                    db.session.add(transaction)
+                    added_count += 1
+                
+                db.session.commit()
+                flash(f'{added_count}개의 새 데이터가 추가되었습니다!', 'success')
+                
+            except Exception as add_error:
+                db.session.rollback()
+                flash(f'데이터 추가 중 오류 발생: {str(add_error)}', 'error')
+                
         except Exception as e:
             flash(f'파일 처리 중 오류 발생: {str(e)}', 'error')
+        
         return redirect(url_for('show_results'))
 
     base_query = Transaction.query.filter_by(profile_id=profile_id)
@@ -422,6 +447,39 @@ def delete_item(item_id):
     if category_filter:
         redirect_args['category_filter'] = category_filter
     return redirect(url_for('show_results', **redirect_args))
+
+
+@app.route('/delete_multiple', methods=['POST'])
+@login_required
+def delete_multiple():
+    try:
+        data = request.get_json()
+        ids_to_delete = data.get('ids', [])
+        
+        if not ids_to_delete:
+            return {'success': False, 'message': '삭제할 항목이 없습니다.'}
+        
+        profile_id = session.get('active_profile_id')
+        deleted_count = 0
+        
+        for item_id in ids_to_delete:
+            transaction = Transaction.query.get(item_id)
+            if transaction and transaction.profile.user_id == current_user.id:
+                db.session.delete(transaction)
+                deleted_count += 1
+        
+        db.session.commit()
+        
+        return {
+            'success': True, 
+            'message': f'{deleted_count}개 항목이 삭제되었습니다.'
+        }
+        
+    except Exception as e:
+        db.session.rollback()
+        return {'success': False, 'message': str(e)}
+
+
 
 @app.route('/rules', methods=['GET', 'POST'])
 @login_required
