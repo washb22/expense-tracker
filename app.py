@@ -113,7 +113,7 @@ class MenuPermission(db.Model):
     workspace_id = db.Column(db.Integer, db.ForeignKey('workspace.id'), nullable=False)
     menu_name = db.Column(db.String(100), nullable=False)
     user = db.relationship('User')
-    workspace = db.relationship('Workspace')
+    
 
 class Transaction(db.Model):
     id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
