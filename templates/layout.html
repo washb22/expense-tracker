@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}머니로그(MoneyLog){% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <aside class="sidebar">
+            <h1 class="logo">MoneyLog</h1>
+            
+            {% if current_user.is_authenticated %}
+            <div class="profile-selector">
+                <div class="dropdown">
+                    <button class="btn btn-secondary dropdown-toggle" type="button">
+                        {{ active_workspace.name if active_workspace else '사업장 선택' }}
+                    </button>
+                    <div class="dropdown-menu">
+                        {% for member_assoc in workspace_members %}
+                        <a class="dropdown-item" href="{{ url_for('select_workspace', workspace_id=member_assoc.workspace.id) }}">
+                            {{ member_assoc.workspace.name }}
+                        </a>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+            <script>
+                document.addEventListener('DOMContentLoaded', function() {
+                    const dropdownToggle = document.querySelector('.dropdown-toggle');
+                    const dropdownMenu = document.querySelector('.dropdown-menu');
+                    if (dropdownToggle) {
+                        dropdownToggle.addEventListener('click', function(event) {
+                            event.stopPropagation();
+                            dropdownMenu.classList.toggle('show');
+                        });
+                    }
+                    window.addEventListener('click', function(event) {
+                        if (dropdownMenu && !dropdownMenu.contains(event.target) && !dropdownToggle.contains(event.target)) {
+                            dropdownMenu.classList.remove('show');
+                        }
+                    });
+                });
+            </script>
+            {% endif %}
+
+            <nav class="sidebar-nav">
+                <ul>
+                    {% if current_user.is_authenticated %}
+                        {# ⭐️⭐️⭐️ 메뉴별 권한 확인 로직 시작 ⭐️⭐️⭐️ #}
+
+                        {% if 'dashboard' in user_menu_permissions %}
+                        <li><a href="{{ url_for('index') }}" class="{{ 'active' if active_page == 'dashboard' else '' }}">대시보드</a></li>
+                        {% endif %}
+                        
+                        {% if 'classify' in user_menu_permissions %}
+                        <li><a href="{{ url_for('show_results') }}" class="{{ 'active' if active_page == 'classify' else '' }}">거래내역 분류</a></li>
+                        {% endif %}
+
+                        {% if 'rules' in user_menu_permissions %}
+                        <li><a href="{{ url_for('manage_rules') }}" class="{{ 'active' if active_page == 'rules' else '' }}">카테고리 설정</a></li>
+                        {% endif %}
+
+                        {# 사업 관리 메뉴 그룹을 표시할지 결정하는 구분선 #}
+                        {% if 'business_dashboard' in user_menu_permissions or 'business_sales' in user_menu_permissions or 'business_products' in user_menu_permissions %}
+                        <hr style="border-color: #444; margin: 20px 0;">
+                        {% endif %}
+
+                        {% if 'business_dashboard' in user_menu_permissions %}
+                        <li><a href="{{ url_for('business_dashboard') }}" class="{{ 'active' if active_page == 'business_dashboard' else '' }}">사업 대시보드</a></li>
+                        {% endif %}
+
+                        {% if 'business_sales' in user_menu_permissions %}
+                        <li><a href="{{ url_for('business_sales') }}" class="{{ 'active' if active_page == 'business_sales' else '' }}">매출 관리</a></li>
+                        {% endif %}
+
+                        {% if 'business_products' in user_menu_permissions %}
+                        <li><a href="{{ url_for('business_products') }}" class="{{ 'active' if active_page == 'business_products' else '' }}">제품 관리</a></li>
+                        {% endif %}
+            
+                       <hr style="border-color: #444; margin: 20px 0;">
+                       {# '사업장 관리'는 기본으로 보여주도록 설정 #}
+                       <li><a href="{{ url_for('manage_workspaces') }}" class="{{ 'active' if active_page == 'workspace' else '' }}">사업장 관리</a></li>
+                       <li><a href="{{ url_for('logout') }}">로그아웃</a></li>
+                    {% else %}
+                        <li><a href="{{ url_for('login') }}">로그인</a></li>
+                        <li><a href="{{ url_for('register') }}">회원가입</a></li>
+                    {% endif %}
+                </ul>
+            </nav>
+        </aside>
+
+        <main>
+            {% with messages = get_flashed_messages(with_categories=true) %}
+              {% if messages %}
+                <div class="flash-messages">
+                {% for category, message in messages %}
+                  <div class="alert alert-{{ category }}">{{ message }}</div>
+                {% endfor %}
+                </div>
+              {% endif %}
+            {% endwith %}
+            
+            {% block content %}{% endblock %}
+        </main>
+    </div>
+</body>
+</html>
+

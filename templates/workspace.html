@@ -1,0 +1,128 @@
+{% extends "layout.html" %}
+
+{% block title %}사업장 관리{% endblock %}
+
+{% block content %}
+<div class="header">
+    <h1>사업장 관리</h1>
+    <p>새로운 사업장을 만들거나 기존 사업장의 멤버를 관리하세요.</p>
+</div>
+
+<!-- 새 사업장 추가 -->
+<div class="card">
+    <h3>새 사업장 만들기</h3>
+    <form method="post" action="{{ url_for('manage_workspaces') }}" class="simple-form">
+        <div class="form-row">
+            <label for="workspace_name">사업장 이름</label>
+            <input type="text" name="workspace_name" id="workspace_name" placeholder="예: (주)머니로그" required>
+        </div>
+        <button type="submit" class="btn btn-primary">사업장 만들기</button>
+    </form>
+</div>
+
+<!-- 사업장 목록 -->
+<div class="card mt-4">
+    <h3>내 사업장 목록</h3>
+    {% if workspace_members %}
+    <ul class="list-group">
+        {% for member_assoc in workspace_members %}
+        <li class="list-group-item">
+            <div class="profile-info">
+                <span class="profile-name">{{ member_assoc.workspace.name }}</span>
+                
+                {% if active_workspace and active_workspace.id == member_assoc.workspace.id %}
+                    <span class="badge bg-primary">활성</span>
+                {% endif %}
+
+                <span style="margin-left: 10px; font-size: 0.9em; color: #a0a0a0;">({{ member_assoc.role }})</span>
+            </div>
+            <div class="profile-actions">
+                <a href="{{ url_for('select_workspace', workspace_id=member_assoc.workspace.id) }}" class="btn btn-sm btn-success">선택</a>
+                
+                {% if member_assoc.role in ['owner', 'admin'] %}
+                <!-- ⭐️⭐️⭐️ 수정 버튼 추가 ⭐️⭐️⭐️ -->
+                <button type="button" class="btn btn-sm btn-info edit-workspace-btn" 
+                        data-workspace-id="{{ member_assoc.workspace.id }}" 
+                        data-workspace-name="{{ member_assoc.workspace.name }}">
+                    수정
+                </button>
+                <a href="{{ url_for('manage_members', workspace_id=member_assoc.workspace.id) }}" class="btn btn-sm btn-secondary">멤버 관리</a>
+                {% endif %}
+
+                {% if member_assoc.role == 'owner' %}
+                <form action="{{ url_for('delete_workspace', workspace_id=member_assoc.workspace.id) }}" method="post" style="display:inline;" onsubmit="return confirm('정말 이 사업장과 모든 데이터를 삭제하시겠습니까?');">
+                    <button type="submit" class="btn btn-sm btn-danger">삭제</button>
+                </form>
+                {% endif %}
+            </div>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p>소속된 사업장이 없습니다. 위에서 새 사업장을 만들어보세요.</p>
+    {% endif %}
+</div>
+
+<!-- ⭐️⭐️⭐️ 사업장 이름 수정 모달 ⭐️⭐️⭐️ -->
+<div id="edit-workspace-modal" class="modal">
+    <div class="modal-content">
+        <span class="close-button">&times;</span>
+        <h3>사업장 이름 수정</h3>
+        <form id="edit-workspace-form" method="POST">
+            <div class="form-group">
+                <label for="edit_workspace_name">새 사업장 이름</label>
+                <input type="text" name="workspace_name" id="edit_workspace_name" class="form-control" required>
+            </div>
+            <button type="submit" class="btn btn-primary">저장</button>
+        </form>
+    </div>
+</div>
+
+<style>
+/* ... (기존 CSS 스타일은 여기에 있거나 style.css에 있어야 함) ... */
+.btn-info {
+    background-color: transparent;
+    color: #0dcaf0;
+    border: 1px solid #0dcaf0;
+}
+.btn-info:hover {
+    background-color: #0dcaf0;
+    color: #000;
+}
+.modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.7); }
+.modal-content { background-color: var(--card-bg); margin: 15% auto; padding: 30px; border: 1px solid var(--border-color); width: 90%; max-width: 500px; border-radius: 12px; position: relative; }
+.close-button { color: #aaa; position: absolute; top: 15px; right: 25px; font-size: 28px; font-weight: bold; cursor: pointer; }
+</style>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const modal = document.getElementById('edit-workspace-modal');
+    const closeButton = modal.querySelector('.close-button');
+    const editForm = document.getElementById('edit-workspace-form');
+    const editInput = document.getElementById('edit_workspace_name');
+
+    document.querySelectorAll('.edit-workspace-btn').forEach(button => {
+        button.addEventListener('click', function () {
+            const workspaceId = this.dataset.workspaceId;
+            const workspaceName = this.dataset.workspaceName;
+            
+            // 폼의 action URL과 입력창의 기본값을 설정
+            editForm.action = `/workspace/edit/${workspaceId}`;
+            editInput.value = workspaceName;
+            
+            modal.style.display = 'block';
+        });
+    });
+
+    closeButton.onclick = function () {
+        modal.style.display = 'none';
+    }
+
+    window.onclick = function (event) {
+        if (event.target == modal) {
+            modal.style.display = 'none';
+        }
+    }
+});
+</script>
+{% endblock %}

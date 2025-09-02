@@ -1,0 +1,575 @@
+{% extends "layout.html" %}
+
+{% block title %}매출 관리{% endblock %}
+
+{% block content %}
+<div class="header">
+    <h1>매출 관리</h1>
+    <p>제품 판매 내역을 등록하고 순이익을 계산하세요.</p>
+</div>
+
+<!-- 개별 매출 등록 -->
+<div class="card">
+    <h3>매출 등록</h3>
+    
+    {% if not products or not platforms %}
+    <div style="background: linear-gradient(135deg, #ffc107, #e0a800); color: #333; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
+        <h4>설정이 필요합니다</h4>
+        <p>매출을 등록하려면 먼저 제품과 판매채널을 등록해주세요.</p>
+        <a href="{{ url_for('business_products') }}" class="btn btn-primary" style="background-color: #333; color: white; margin-top: 10px;">제품/채널 관리하기</a>
+    </div>
+    {% else %}
+    
+    <form method="POST" action="{{ url_for('add_sale') }}" id="sale-form">
+        <div class="form-group" style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+            <div>
+                <label for="date">판매일</label>
+                <input type="date" id="date" name="date" class="form-control" value="{{ today }}" required>
+            </div>
+            <div>
+                <label for="quantity">수량</label>
+                <input type="number" id="quantity" name="quantity" class="form-control" value="1" min="1" oninput="calculateProfit()">
+            </div>
+        </div>
+        
+        <div class="form-group" style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+            <div>
+                <label for="product_id">제품 선택</label>
+                <select id="product_id" name="product_id" class="form-control" required onchange="calculateProfit()">
+                    <option value="">제품을 선택하세요</option>
+                    {% for product in products %}
+                    <option value="{{ product.id }}" data-cost="{{ product.cost_price }}">
+                        {{ product.name }} (원가: {{ '{:,.0f}'.format(product.cost_price) }}원)
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div>
+                <label for="platform_id">판매채널</label>
+                <select id="platform_id" name="platform_id" class="form-control" required onchange="calculateProfit()">
+                    <option value="">채널을 선택하세요</option>
+                    {% for platform in platforms %}
+                    <option value="{{ platform.id }}" data-commission="{{ platform.commission_rate }}">
+                        {{ platform.name }} (수수료: {{ platform.commission_rate }}%)
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+        </div>
+        
+        <div class="form-group">
+            <label for="selling_price">총 실제 매출금액</label>
+            <input type="number" id="selling_price" name="selling_price" class="form-control" required oninput="calculateProfit()" placeholder="수량과 상관없이 실제로 받은 총 금액 (예: 154300)">
+            <small style="color: #888; display: block; margin-top: 5px;">
+                예: 헤모센 2개 팔아서 154,300원 받았다면 → 154300 입력
+            </small>
+        </div>
+        
+        <!-- 실시간 순이익 계산 표시 -->
+        <div id="profit-preview" style="background: #333; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #00a6da; display: none;">
+            <div style="display: flex; justify-content: space-between; margin: 8px 0;">
+                <span>총 판매금액:</span>
+                <span id="total-selling">₩0</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; margin: 8px 0;">
+                <span>총 제품원가:</span>
+                <span id="total-cost">₩0</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; margin: 8px 0;">
+                <span>수수료:</span>
+                <span id="commission">₩0</span>
+            </div>
+            <hr style="border: none; height: 1px; background: #555; margin: 15px 0;">
+            <div style="display: flex; justify-content: space-between; font-size: 1.2em; font-weight: bold;">
+                <span>순이익:</span>
+                <span id="net-profit" style="color: #28a745;">₩0</span>
+            </div>
+        </div>
+        
+        <button type="submit" class="btn btn-success">매출 등록</button>
+    </form>
+    {% endif %}
+</div>
+
+<!-- 엑셀 업로드 -->
+<div class="card mt-4">
+    <h3>엑셀로 매출 일괄 등록</h3>
+    
+    <div style="background: linear-gradient(135deg, #6f42c1, #5a32a3); color: white; padding: 20px; border-radius: 12px; margin-bottom: 20px;">
+        <h4>엑셀 파일 형식</h4>
+        <div style="background: white; color: #333; border-radius: 8px; overflow: hidden; margin-top: 15px;">
+            <table style="width: 100%; border-collapse: collapse;">
+                <thead>
+                    <tr style="background: #f8f9fa;">
+                        <th style="padding: 12px; border: 1px solid #ddd; text-align: center;">판매일</th>
+                        <th style="padding: 12px; border: 1px solid #ddd; text-align: center;">제품명</th>
+                        <th style="padding: 12px; border: 1px solid #ddd; text-align: center;">판매채널</th>
+                        <th style="padding: 12px; border: 1px solid #ddd; text-align: center;">실제판매가</th>
+                        <th style="padding: 12px; border: 1px solid #ddd; text-align: center;">수량</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">2025-01-15</td>
+                        <td style="padding: 8px; border: 1px solid #ddd;">무선 이어폰</td>
+                        <td style="padding: 8px; border: 1px solid #ddd;">쿠팡</td>
+                        <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">45000</td>
+                        <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">1</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">2025-01-16</td>
+                        <td style="padding: 8px; border: 1px solid #ddd;">무선 이어폰</td>
+                        <td style="padding: 8px; border: 1px solid #ddd;">쿠팡</td>
+                        <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">42000</td>
+                        <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">1</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        <p style="margin-top: 15px; font-size: 0.9em;">
+            <strong>주의:</strong> 제품명과 판매채널은 미리 등록된 것과 정확히 일치해야 합니다.
+        </p>
+    </div>
+    
+    <form method="POST" action="{{ url_for('upload_sales') }}" enctype="multipart/form-data" id="upload-form">
+        <div class="form-group">
+            <label for="sales-file">엑셀/CSV 파일 선택</label>
+            <input type="file" id="sales-file" name="file" class="form-control" accept=".xlsx,.csv" required>
+        </div>
+        <div style="display: flex; gap: 10px;">
+            <button type="submit" class="btn btn-primary">데이터 추가</button>
+            <button type="button" id="replace-all-btn" class="btn btn-danger">전체 교체</button>
+        </div>
+    </form>
+</div>
+
+<!-- 월별/기간별 필터 및 매출 목록 -->
+<div class="card mt-4">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+        <h3>매출 목록</h3>
+        <div class="month-filters">
+            <button id="sales-date-range-btn" class="btn btn-primary btn-sm">기간 설정</button>
+            <a href="{{ url_for('business_sales') }}" class="btn btn-sm {{ 'btn-active' if not selected_month and not start_date else 'btn-secondary' }}">전체</a>
+            
+            {% for month in available_months %}
+            <a href="{{ url_for('business_sales', month=month) }}" 
+               class="btn btn-sm {{ 'btn-active' if selected_month == month else 'btn-secondary' }}">{{ month }}</a>
+            {% endfor %}
+        </div>
+    </div>
+    
+    <!-- 기간 설정 모달 -->
+    <div id="sales-date-range-modal" class="modal">
+        <div class="modal-content">
+            <span class="close-button sales-close">&times;</span>
+            <h3>기간 설정</h3>
+            <form action="{{ url_for('business_sales') }}" method="get" class="date-range-form">
+                <div class="form-group">
+                    <label for="sales_start_date">시작일:</label>
+                    <input type="date" id="sales_start_date" name="start_date" value="{{ start_date or '' }}">
+                </div>
+                <div class="form-group">
+                    <label for="sales_end_date">종료일:</label>
+                    <input type="date" id="sales_end_date" name="end_date" value="{{ end_date or '' }}">
+                </div>
+                <button type="submit" class="btn btn-primary">조회</button>
+            </form>
+        </div>
+    </div>
+    
+    <!-- 전체선택/선택삭제 버튼 -->
+    {% if sales %}
+    <div style="margin-bottom: 15px;">
+        <button type="button" id="select-all-sales-btn" class="btn btn-secondary btn-sm">전체선택</button>
+        <button type="button" id="delete-selected-sales-btn" class="btn btn-danger btn-sm" style="margin-left: 10px;">선택삭제</button>
+        <span id="selected-sales-count" style="margin-left: 15px; color: #ccc;">선택된 항목: 0개</span>
+    </div>
+    {% endif %}
+    
+    {% if sales %}
+    <div class="table-responsive">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th style="width: 40px;">
+                        <input type="checkbox" id="master-sales-checkbox">
+                    </th>
+                    <th>날짜</th>
+                    <th>제품명</th>
+                    <th>채널</th>
+                    <th>판매가</th>
+                    <th>수량</th>
+                    <th>원가</th>
+                    <th>수수료</th>
+                    <th>순이익</th>
+                    <th>관리</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for sale in sales %}
+                <tr id="sale-{{ sale.id }}">
+                    <td>
+                        <input type="checkbox" class="sales-checkbox" value="{{ sale.id }}">
+                    </td>
+                    <td>{{ sale.date.strftime('%Y-%m-%d') }}</td>
+                    <td>{{ sale.product.name }}</td>
+                    <td>{{ sale.platform.name }}</td>
+                    <td>{{ '{:,.0f}'.format(sale.selling_price) }}원</td>
+                    <td>{{ sale.quantity }}</td>
+                    <td>{{ '{:,.0f}'.format(sale.total_cost_amount) }}원</td>
+                    <td>{{ '{:,.0f}'.format(sale.commission_amount) }}원</td>
+                    <td style="color: {% if sale.net_profit >= 0 %}#28a745{% else %}#dc3545{% endif %}">
+                        {{ '{:,.0f}'.format(sale.net_profit) }}원
+                    </td>
+                    <td>
+                        <button class="btn btn-danger btn-sm delete-sale-btn" data-id="{{ sale.id }}">삭제</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p style="text-align: center; color: #888; padding: 40px;">
+        {% if selected_month or start_date %}
+        선택된 기간에 등록된 매출이 없습니다.
+        {% else %}
+        등록된 매출이 없습니다.
+        {% endif %}
+    </p>
+    {% endif %}
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // 실시간 순이익 계산
+    function calculateProfit() {
+        const productSelect = document.getElementById('product_id');
+        const platformSelect = document.getElementById('platform_id');
+        const sellingPrice = parseInt(document.getElementById('selling_price').value) || 0;
+        const quantity = parseInt(document.getElementById('quantity').value) || 1;
+        
+        if (!productSelect.value || !platformSelect.value || !sellingPrice) {
+            document.getElementById('profit-preview').style.display = 'none';
+            return;
+        }
+        
+        const costPrice = parseInt(productSelect.options[productSelect.selectedIndex].dataset.cost) || 0;
+        const commissionRate = parseFloat(platformSelect.options[platformSelect.selectedIndex].dataset.commission) || 0;
+        
+        // 수정된 계산 로직
+        const totalSelling = sellingPrice; // 이미 총 금액
+        const totalCost = costPrice * quantity;
+        const commission = Math.floor(totalSelling * commissionRate / 100);
+        const netProfit = totalSelling - totalCost - commission;
+        
+        document.getElementById('total-selling').textContent = `₩${totalSelling.toLocaleString()}`;
+        document.getElementById('total-cost').textContent = `₩${totalCost.toLocaleString()}`;
+        document.getElementById('commission').textContent = `₩${commission.toLocaleString()}`;
+        document.getElementById('net-profit').textContent = `₩${netProfit.toLocaleString()}`;
+        document.getElementById('net-profit').style.color = netProfit >= 0 ? '#28a745' : '#dc3545';
+        
+        document.getElementById('profit-preview').style.display = 'block';
+    }
+    
+    // 전역으로 calculateProfit 함수 노출
+    window.calculateProfit = calculateProfit;
+    
+    // 알림 메시지 표시 함수
+    function showToast(message, type = 'success') {
+        const toast = document.createElement('div');
+        toast.className = `toast-notification toast-${type}`;
+        toast.textContent = message;
+        toast.style.cssText = `
+            position: fixed; top: 20px; right: 20px; z-index: 9999;
+            padding: 15px 20px; border-radius: 8px; color: white; font-weight: bold;
+            opacity: 0; transform: translateX(100%); transition: all 0.3s ease;
+            background-color: ${type === 'success' ? '#28a745' : '#dc3545'};
+        `;
+        document.body.appendChild(toast);
+        
+        setTimeout(() => {
+            toast.style.opacity = '1';
+            toast.style.transform = 'translateX(0)';
+        }, 100);
+        
+        setTimeout(() => {
+            toast.style.opacity = '0';
+            toast.style.transform = 'translateX(100%)';
+            setTimeout(() => toast.remove(), 300);
+        }, 3000);
+    }
+    
+    // 개별 매출 삭제
+    document.querySelectorAll('.delete-sale-btn').forEach(button => {
+        button.addEventListener('click', function() {
+            if (!confirm('정말 이 매출을 삭제하시겠습니까?')) return;
+            
+            const saleId = this.dataset.id;
+            fetch(`/business/sales/delete/${saleId}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    document.getElementById(`sale-${saleId}`).remove();
+                    updateSalesSelectedCount();
+                    showToast(data.message);
+                } else {
+                    showToast(data.message, 'error');
+                }
+            })
+            .catch(() => showToast('삭제 중 오류가 발생했습니다.', 'error'));
+        });
+    });
+    
+    // 체크박스 관련 함수들
+    function updateSalesSelectedCount() {
+        const checkedBoxes = document.querySelectorAll('.sales-checkbox:checked');
+        const countElement = document.getElementById('selected-sales-count');
+        const deleteBtn = document.getElementById('delete-selected-sales-btn');
+        
+        if (countElement) countElement.textContent = `선택된 항목: ${checkedBoxes.length}개`;
+        if (deleteBtn) deleteBtn.disabled = checkedBoxes.length === 0;
+    }
+    
+    // 마스터 체크박스
+    const masterSalesCheckbox = document.getElementById('master-sales-checkbox');
+    if (masterSalesCheckbox) {
+        masterSalesCheckbox.addEventListener('change', function() {
+            document.querySelectorAll('.sales-checkbox').forEach(checkbox => {
+                checkbox.checked = this.checked;
+            });
+            updateSalesSelectedCount();
+        });
+    }
+    
+    // 개별 체크박스
+    document.querySelectorAll('.sales-checkbox').forEach(checkbox => {
+        checkbox.addEventListener('change', function() {
+            const allCheckboxes = document.querySelectorAll('.sales-checkbox');
+            const allChecked = Array.from(allCheckboxes).every(cb => cb.checked);
+            const anyChecked = Array.from(allCheckboxes).some(cb => cb.checked);
+            
+            if (masterSalesCheckbox) {
+                masterSalesCheckbox.checked = allChecked;
+                masterSalesCheckbox.indeterminate = anyChecked && !allChecked;
+            }
+            updateSalesSelectedCount();
+        });
+    });
+    
+    // 전체선택 버튼
+    const selectAllSalesBtn = document.getElementById('select-all-sales-btn');
+    if (selectAllSalesBtn) {
+        selectAllSalesBtn.addEventListener('click', function() {
+            const salesCheckboxes = document.querySelectorAll('.sales-checkbox');
+            const allChecked = Array.from(salesCheckboxes).every(cb => cb.checked);
+            
+            salesCheckboxes.forEach(checkbox => {
+                checkbox.checked = !allChecked;
+            });
+            
+            if (masterSalesCheckbox) {
+                masterSalesCheckbox.checked = !allChecked;
+                masterSalesCheckbox.indeterminate = false;
+            }
+            
+            updateSalesSelectedCount();
+            this.textContent = allChecked ? '전체선택' : '선택해제';
+        });
+    }
+    
+    // 선택삭제 버튼
+    const deleteSelectedSalesBtn = document.getElementById('delete-selected-sales-btn');
+    if (deleteSelectedSalesBtn) {
+        deleteSelectedSalesBtn.addEventListener('click', function() {
+            const checkedBoxes = document.querySelectorAll('.sales-checkbox:checked');
+            if (checkedBoxes.length === 0) {
+                alert('삭제할 항목을 선택해주세요.');
+                return;
+            }
+            
+            if (!confirm(`선택한 ${checkedBoxes.length}개 매출을 삭제하시겠습니까?`)) return;
+            
+            const idsToDelete = Array.from(checkedBoxes).map(cb => cb.value);
+            
+            fetch('/business/sales/delete_multiple', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ids: idsToDelete })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    idsToDelete.forEach(id => {
+                        const row = document.getElementById(`sale-${id}`);
+                        if (row) row.remove();
+                    });
+                    updateSalesSelectedCount();
+                    showToast(data.message);
+                } else {
+                    showToast(data.message, 'error');
+                }
+            })
+            .catch(() => showToast('삭제 중 오류가 발생했습니다.', 'error'));
+        });
+    }
+    
+    // 기간 설정 모달 (매출용)
+    const salesModal = document.getElementById('sales-date-range-modal');
+    const salesBtn = document.getElementById('sales-date-range-btn');
+    const salesCloseBtn = document.querySelector('.sales-close');
+    
+    if (salesBtn && salesModal) {
+        salesBtn.onclick = () => salesModal.style.display = "block";
+    }
+    if (salesCloseBtn && salesModal) {
+        salesCloseBtn.onclick = () => salesModal.style.display = "none";
+    }
+    
+    window.addEventListener('click', function(event) {
+        if (event.target == salesModal) {
+            salesModal.style.display = "none";
+        }
+    });
+    
+    // 엑셀 업로드 폼 처리
+    document.getElementById('upload-form').addEventListener('submit', function(e) {
+        e.preventDefault();
+        
+        const formData = new FormData(this);
+        const submitBtn = this.querySelector('button[type="submit"]');
+        const originalText = submitBtn.textContent;
+        
+        submitBtn.disabled = true;
+        submitBtn.textContent = '업로드 중...';
+        
+        fetch('{{ url_for("upload_sales") }}', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                showToast(data.message);
+                setTimeout(() => location.reload(), 1000);
+            } else {
+                showToast('오류: ' + data.message, 'error');
+            }
+        })
+        .catch(error => {
+            showToast('업로드 중 오류가 발생했습니다.', 'error');
+        })
+        .finally(() => {
+            submitBtn.disabled = false;
+            submitBtn.textContent = originalText;
+        });
+    });
+    
+    // 전체 교체 버튼
+    document.getElementById('replace-all-btn').addEventListener('click', function() {
+        if (!confirm('기존 매출 데이터를 모두 삭제하고 새 파일로 교체하시겠습니까?\n이 작업은 되돌릴 수 없습니다.')) {
+            return;
+        }
+        
+        const fileInput = document.getElementById('sales-file');
+        if (!fileInput.files[0]) {
+            alert('먼저 파일을 선택해주세요.');
+            return;
+        }
+        
+        const formData = new FormData();
+        formData.append('file', fileInput.files[0]);
+        
+        this.disabled = true;
+        this.textContent = '교체 중...';
+        
+        fetch('/business/sales/replace_all', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                showToast(data.message);
+                setTimeout(() => location.reload(), 1000);
+            } else {
+                showToast('오류: ' + data.message, 'error');
+            }
+        })
+        .catch(error => {
+            showToast('교체 중 오류가 발생했습니다.', 'error');
+        })
+        .finally(() => {
+            this.disabled = false;
+            this.textContent = '전체 교체';
+        });
+    });
+    
+    // 초기 상태 설정
+    updateSalesSelectedCount();
+});
+</script>
+
+<style>
+    .form-group {
+        margin-bottom: 1.5rem;
+    }
+    
+    .mt-4 {
+        margin-top: 2rem;
+    }
+    
+    .month-filters {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        align-items: center;
+    }
+    
+    .month-filters .btn {
+        text-decoration: none;
+    }
+    
+    /* 모달 스타일 */
+    .modal {
+        display: none; 
+        position: fixed; 
+        z-index: 1000; 
+        left: 0; top: 0;
+        width: 100%; height: 100%; 
+        overflow: auto; 
+        background-color: rgba(0,0,0,0.6);
+    }
+    
+    .modal-content {
+        background-color: var(--card-bg);
+        margin: 15% auto;
+        padding: 30px;
+        border: 1px solid var(--border-color);
+        width: 80%; max-width: 400px;
+        border-radius: 12px;
+        position: relative;
+    }
+    
+    .close-button {
+        color: #aaa;
+        position: absolute;
+        top: 15px; right: 20px;
+        font-size: 28px;
+        font-weight: bold;
+        cursor: pointer;
+    }
+    
+    .date-range-form input[type="date"] {
+        background-color: #3e3e3e;
+        color: #fff;
+        border: 1px solid var(--border-color);
+        border-radius: 4px;
+        padding: 8px;
+        width: 100%;
+    }
+</style>
+{% endblock %}

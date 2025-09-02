@@ -1,0 +1,445 @@
+{% extends "layout.html" %}
+
+{% block title %}사업 대시보드{% endblock %}
+
+{% block content %}
+<div class="header" style="display: flex; justify-content: space-between; align-items: flex-start;">
+    <div>
+        <h1>사업 대시보드</h1>
+        <p>매출과 지출을 통합 관리하여 순이익을 확인하세요.</p>
+    </div>
+    <div>
+        <button id="export-business-btn" class="btn btn-success">📊 매출 리포트 내보내기</button>
+    </div>
+</div>
+
+<!-- 월별/기간별 필터 -->
+<div class="month-filters">
+    <button id="date-range-btn" class="btn btn-primary">기간 설정</button>
+    <a href="{{ url_for('business_dashboard') }}" class="btn {{ 'btn-active' if not selected_month and not start_date else 'btn-secondary' }}">전체</a>
+    
+    {% for month in available_months %}
+    <a href="{{ url_for('business_dashboard', month=month) }}" 
+       class="btn {{ 'btn-active' if selected_month == month else 'btn-secondary' }}">{{ month }}</a>
+    {% endfor %}
+</div>
+
+<!-- 기간 설정 모달 -->
+<div id="date-range-modal" class="modal">
+    <div class="modal-content">
+        <span class="close-button">&times;</span>
+        <h3>기간 설정</h3>
+        <form action="{{ url_for('business_dashboard') }}" method="get" class="date-range-form">
+            <div class="form-group">
+                <label for="start_date">시작일:</label>
+                <input type="date" id="start_date" name="start_date" value="{{ start_date or '' }}">
+            </div>
+            <div class="form-group">
+                <label for="end_date">종료일:</label>
+                <input type="date" id="end_date" name="end_date" value="{{ end_date or '' }}">
+            </div>
+            <button type="submit" class="btn btn-primary">조회</button>
+        </form>
+    </div>
+</div>
+
+<!-- 요약 카드들 -->
+<div class="summary-cards">
+    <div class="card" style="background: linear-gradient(135deg, #28a745, #20c997); color: white;">
+        <h3>총 매출</h3>
+        <p>{{ '{:,.0f}'.format(total_revenue) }} 원</p>
+    </div>
+    <div class="card" style="background: linear-gradient(135deg, #00a6da, #0088b3); color: white;">
+        <h3>매출 총이익</h3>
+        <p>{{ '{:,.0f}'.format(gross_profit) }} 원</p>
+    </div>
+    <div class="card" style="background: linear-gradient(135deg, #ffc107, #e0a800); color: #333;">
+        <h3>총 지출</h3>
+        <p>{{ '{:,.0f}'.format(total_expenses) }} 원</p>
+    </div>
+    <div class="card" 
+         style="background: {% if net_profit >= 0 %}linear-gradient(135deg, #6f42c1, #5a32a3){% else %}linear-gradient(135deg, #dc3545, #b02a37){% endif %}; color: white;">
+        <h3>순이익</h3>
+        <p>{{ '{:,.0f}'.format(net_profit) }} 원</p>
+    </div>
+</div>
+
+<!-- 메인 콘텐츠 -->
+<div class="main-content">
+    <!-- 최근 매출 현황 -->
+    <div class="card">
+        <h3>최근 매출 현황</h3>
+        {% if recent_sales_data %}
+        <div class="table-responsive">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>날짜</th>
+                        <th>제품명</th>
+                        <th>판매채널</th>
+                        <th>판매가</th>
+                        <th>수량</th>
+                        <th>순이익</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for sale in recent_sales_data %}
+                    <tr>
+                        <td>{{ sale['날짜'].strftime('%Y-%m-%d') if sale['날짜'].strftime else sale['날짜'] }}</td>
+                        <td>{{ sale['제품명'] }}</td>
+                        <td>{{ sale['판매채널'] }}</td>
+                        <td>{{ '{:,.0f}'.format(sale['판매가']) }} 원</td>
+                        <td>{{ sale['수량'] }}</td>
+                        <td style="color: {% if sale['순이익'] >= 0 %}#28a745{% else %}#dc3545{% endif %}">
+                            {{ '{:,.0f}'.format(sale['순이익']) }} 원
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <p style="text-align: center; color: #888; padding: 40px;">
+            {% if selected_month or start_date %}
+            선택된 기간에 매출이 없습니다.
+            {% else %}
+            아직 등록된 매출이 없습니다.
+            {% endif %}
+        </p>
+        <div style="text-align: center;">
+            <a href="{{ url_for('business_products') }}" class="btn btn-primary">제품 등록하기</a>
+            <a href="{{ url_for('business_sales') }}" class="btn btn-success" style="margin-left: 10px;">매출 등록하기</a>
+        </div>
+        {% endif %}
+    </div>
+    
+    <!-- 날짜별 판매현황 -->
+    <div class="card">
+        <h3>날짜별 판매현황</h3>
+        {% if date_details %}
+        <div class="category-buttons">
+            {% for date in date_details.keys() %}
+            <button class="category-btn date-btn" data-date="{{ date }}">{{ date }}</button>
+            {% endfor %}
+        </div>
+        <div id="date-details-container">
+            <p>위 날짜를 클릭하여 상세 판매 내역을 확인하세요.</p>
+        </div>
+        {% else %}
+        <p style="text-align: center; color: #888; padding: 40px;">
+            {% if selected_month or start_date %}
+            선택된 기간에 매출 데이터가 없습니다.
+            {% else %}
+            아직 매출 데이터가 없습니다.
+            {% endif %}
+        </p>
+        {% endif %}
+        
+        <!-- 빠른 액션 -->
+        <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #444;">
+            <h4>빠른 액션</h4>
+            <div style="display: flex; gap: 15px; flex-wrap: wrap;">
+                <a href="{{ url_for('business_sales') }}" class="btn btn-success">매출 등록</a>
+                <a href="{{ url_for('business_products') }}" class="btn btn-primary">제품 관리</a>
+                <a href="{{ url_for('show_results') }}" class="btn btn-secondary">지출 등록</a>
+            </div>
+        </div>
+        
+        {% if recent_sales_data %}
+        <div style="margin-top: 20px; padding: 15px; background: #333; border-radius: 8px;">
+            <h4 style="margin-bottom: 10px;">
+                {% if selected_month %}{{ selected_month }} 요약{% elif start_date and end_date %}{{ start_date }} ~ {{ end_date }} 요약{% else %}전체 요약{% endif %}
+            </h4>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+                <div>
+                    <strong>매출액:</strong> {{ '{:,.0f}'.format(total_revenue) }} 원<br>
+                    <strong>매출이익:</strong> {{ '{:,.0f}'.format(gross_profit) }} 원
+                </div>
+                <div>
+                    <strong>지출액:</strong> {{ '{:,.0f}'.format(total_expenses) }} 원<br>
+                    <strong>순이익:</strong> 
+                    <span style="color: {% if net_profit >= 0 %}#28a745{% else %}#dc3545{% endif %}">
+                        {{ '{:,.0f}'.format(net_profit) }} 원
+                    </span>
+                </div>
+            </div>
+            
+            {% if net_profit > 0 %}
+            <div style="margin-top: 10px; padding: 10px; background: rgba(40, 167, 69, 0.2); border-radius: 4px; color: #28a745;">
+                순이익이 발생했습니다! 수익률: {{ '{:.1f}'.format((net_profit / total_revenue * 100) if total_revenue > 0 else 0) }}%
+            </div>
+            {% elif net_profit < 0 %}
+            <div style="margin-top: 10px; padding: 10px; background: rgba(220, 53, 69, 0.2); border-radius: 4px; color: #dc3545;">
+                손실이 발생했습니다. 지출 관리가 필요합니다.
+            </div>
+            {% endif %}
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<style>
+    .main-content {
+        display: grid;
+        grid-template-columns: 1.5fr 1fr;
+        gap: 30px;
+        align-items: start;
+    }
+    
+    .month-filters {
+        margin-bottom: 30px;
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        align-items: center;
+    }
+    
+    .month-filters .btn {
+        text-decoration: none;
+    }
+    
+    /* 모달 스타일 */
+    .modal {
+        display: none; 
+        position: fixed; 
+        z-index: 1000; 
+        left: 0; top: 0;
+        width: 100%; height: 100%; 
+        overflow: auto; 
+        background-color: rgba(0,0,0,0.6);
+    }
+    
+    .modal-content {
+        background-color: var(--card-bg);
+        margin: 15% auto;
+        padding: 30px;
+        border: 1px solid var(--border-color);
+        width: 80%; max-width: 400px;
+        border-radius: 12px;
+        position: relative;
+    }
+    
+    .close-button {
+        color: #aaa;
+        position: absolute;
+        top: 15px; right: 20px;
+        font-size: 28px;
+        font-weight: bold;
+        cursor: pointer;
+    }
+    
+    .date-range-form input[type="date"] {
+        background-color: #3e3e3e;
+        color: #fff;
+        border: 1px solid var(--border-color);
+        border-radius: 4px;
+        padding: 8px;
+        width: 100%;
+    }
+    
+    .date-summary {
+        cursor: pointer;
+        transition: background-color 0.2s;
+    }
+    
+    .date-summary:hover {
+        background-color: #3e3e3e;
+    }
+    
+    .date-summary td:first-child {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    
+    .arrow-icon {
+        transition: transform 0.3s ease;
+        font-size: 0.8em;
+    }
+    
+    .arrow-icon.open {
+        transform: rotate(180deg);
+    }
+    
+    .date-details td {
+        padding: 0 !important;
+        border: none;
+    }
+    
+    .table-nested {
+        width: 100%;
+        margin: 0;
+        background-color: #3a3a3a;
+    }
+    
+    .table-nested td {
+        padding: 8px 25px;
+        border: none;
+    }
+    
+    .table-nested tr:not(:last-child) td {
+        border-bottom: 1px solid #4f4f4f;
+    }
+    
+    @media (max-width: 768px) {
+        .main-content {
+            grid-template-columns: 1fr;
+        }
+    }
+</style>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // --- 모달 로직 ---
+    const modal = document.getElementById("date-range-modal");
+    const btn = document.getElementById("date-range-btn");
+    const span = document.getElementsByClassName("close-button")[0];
+    
+    btn.onclick = function() {
+        modal.style.display = "block";
+    }
+    
+    span.onclick = function() {
+        modal.style.display = "none";
+    }
+    
+    window.onclick = function(event) {
+        if (event.target == modal) {
+            modal.style.display = "none";
+        }
+    }
+
+    // --- 날짜별 상세 내역 표시 로직 ---
+    const dateDetails = {{ date_details | tojson }};
+    const dateButtons = document.querySelectorAll('.date-btn');
+    const detailsContainer = document.getElementById('date-details-container');
+    
+    dateButtons.forEach(button => {
+        button.addEventListener('click', function() {
+            const selectedDate = this.dataset.date;
+            const dateData = dateDetails[selectedDate];
+            
+            detailsContainer.innerHTML = '';
+            
+            if (dateData && Object.keys(dateData.products).length > 0) {
+                // 날짜 요약 정보
+                const summaryDiv = document.createElement('div');
+                summaryDiv.style.cssText = 'background: #333; padding: 15px; border-radius: 8px; margin-bottom: 20px;';
+                summaryDiv.innerHTML = `
+                    <h4 style="margin-bottom: 10px;">${selectedDate} 판매 요약</h4>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+                        <div>
+                            <strong>총 판매수량:</strong> ${dateData.total_quantity}개<br>
+                            <strong>총 매출액:</strong> ${dateData.total_revenue.toLocaleString()}원
+                        </div>
+                        <div>
+                            <strong>총 순이익:</strong> 
+                            <span style="color: ${dateData.total_profit >= 0 ? '#28a745' : '#dc3545'}">
+                                ${dateData.total_profit.toLocaleString()}원
+                            </span>
+                        </div>
+                    </div>
+                `;
+                detailsContainer.appendChild(summaryDiv);
+                
+                // 제품별 상세 테이블
+                const table = document.createElement('table');
+                table.className = 'table';
+                table.innerHTML = `
+                    <thead>
+                        <tr>
+                            <th>제품명</th>
+                            <th>판매수량</th>
+                            <th>매출액</th>
+                            <th>순이익</th>
+                        </tr>
+                    </thead>
+                `;
+                const tbody = document.createElement('tbody');
+                table.appendChild(tbody);
+                
+                for (const productName in dateData.products) {
+                    const productData = dateData.products[productName];
+                    
+                    // 제품 요약 행
+                    const summaryRow = tbody.insertRow();
+                    summaryRow.className = 'date-summary';
+                    summaryRow.innerHTML = `
+                        <td>
+                            <span>${productName}</span>
+                            <span class="arrow-icon">▼</span>
+                        </td>
+                        <td>${productData.quantity}개</td>
+                        <td>${productData.revenue.toLocaleString()}원</td>
+                        <td style="color: ${productData.profit >= 0 ? '#28a745' : '#dc3545'}">
+                            ${productData.profit.toLocaleString()}원
+                        </td>
+                    `;
+                    
+                    // 상세 행 (개별 판매 기록)
+                    const detailsRow = tbody.insertRow();
+                    detailsRow.className = 'date-details';
+                    detailsRow.style.display = 'none';
+                    const detailsCell = detailsRow.insertCell();
+                    detailsCell.colSpan = 4;
+                    
+                    let detailsHtml = '<table class="table-nested"><tbody>';
+                    productData.sales.forEach(sale => {
+                        detailsHtml += `
+                            <tr>
+                                <td>${sale['판매채널']}</td>
+                                <td>단가: ${sale['판매가'].toLocaleString()}원</td>
+                                <td>수량: ${sale['수량']}개</td>
+                                <td style="color: ${sale['순이익'] >= 0 ? '#28a745' : '#dc3545'}">
+                                    순이익: ${sale['순이익'].toLocaleString()}원
+                                </td>
+                            </tr>
+                        `;
+                    });
+                    detailsHtml += '</tbody></table>';
+                    detailsCell.innerHTML = detailsHtml;
+                    
+                    // 클릭 이벤트
+                    summaryRow.addEventListener('click', () => {
+                        const isVisible = detailsRow.style.display === 'table-row';
+                        detailsRow.style.display = isVisible ? 'none' : 'table-row';
+                        summaryRow.querySelector('.arrow-icon').classList.toggle('open');
+                    });
+                }
+                
+                detailsContainer.appendChild(table);
+            } else {
+                detailsContainer.innerHTML = `<p>${selectedDate}에 판매된 제품이 없습니다.</p>`;
+            }
+            
+            // 버튼 활성화 상태 변경
+            dateButtons.forEach(btn => btn.classList.remove('active'));
+            this.classList.add('active');
+        });
+    });
+    
+    // 엑셀 내보내기 버튼
+    document.getElementById('export-business-btn').addEventListener('click', function() {
+        const month = '{{ selected_month or "" }}';
+        const startDate = '{{ start_date or "" }}';
+        const endDate = '{{ end_date or "" }}';
+        
+        let url = '/business/export';
+        const params = new URLSearchParams();
+        
+        if (startDate && endDate) {
+            params.append('start_date', startDate);
+            params.append('end_date', endDate);
+        } else if (month) {
+            params.append('month', month);
+        }
+        
+        if (params.toString()) {
+            url += '?' + params.toString();
+        }
+        
+        window.location.href = url;
+    });
+});
+</script>
+{% endblock %}

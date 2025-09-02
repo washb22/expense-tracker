@@ -1,0 +1,648 @@
+{% extends "layout.html" %}
+
+{% block title %}거래내역 분류{% endblock %}
+
+{% block content %}
+<style>
+    /* 파일 업로드 가이드 스타일 */
+    .excel-example {
+        background-color: #f8f9fa;
+        color: #333;
+        border-radius: 8px;
+        overflow: hidden;
+        margin: 15px 0;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+    .excel-header {
+        background: linear-gradient(135deg, #28a745, #20c997);
+        color: white;
+        padding: 12px;
+        font-weight: bold;
+        text-align: center;
+    }
+    .excel-table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+    .excel-table th {
+        background-color: #e9ecef;
+        padding: 12px;
+        text-align: center;
+        border-right: 1px solid #dee2e6;
+        font-weight: bold;
+        color: #495057;
+    }
+    .excel-table th:last-child { border-right: none; }
+    .excel-table td {
+        padding: 10px;
+        text-align: center;
+        border-right: 1px solid #dee2e6;
+        border-bottom: 1px solid #dee2e6;
+        background-color: #ffffff;
+        color: #333;
+    }
+    .excel-table td:last-child { border-right: none; }
+    .format-options {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 10px;
+    }
+    .format-tag {
+        background-color: rgba(0, 166, 218, 0.2);
+        color: #00a6da;
+        padding: 4px 10px;
+        border-radius: 15px;
+        font-size: 0.85em;
+        border: 1px solid #00a6da;
+    }
+    .warning-list {
+        list-style: none;
+        padding: 0;
+        margin: 15px 0;
+    }
+    .warning-list li {
+        margin: 8px 0;
+        padding: 12px;
+        background-color: rgba(255,193,7,0.1);
+        border-radius: 6px;
+        border-left: 3px solid #ffc107;
+        color: #333;
+    }
+    .code {
+        background-color: rgba(255,255,255,0.2);
+        padding: 3px 8px;
+        border-radius: 4px;
+        font-family: 'Consolas', 'Monaco', monospace;
+        font-size: 0.9em;
+    }
+    .alert-info-custom {
+        background: linear-gradient(135deg, #2c5aa0, #1e3a5f);
+        border-left: 4px solid #00a6da;
+        color: white;
+    }
+    .alert-warning-custom {
+        background: linear-gradient(135deg, #d4a743, #b8941e);
+        color: #1e1e1e;
+        border-left: 4px solid #ffc107;
+    }
+    /* 버튼 필터를 위한 스타일 */
+    .filter-group {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+    }
+    .filter-group-title {
+        font-weight: bold;
+        margin-right: 15px;
+        font-size: 1.1em;
+    }
+    .btn-sm { padding: 5px 10px; font-size: 0.9em; }
+    .modal {
+        display: none; position: fixed; z-index: 1000;
+        left: 0; top: 0; width: 100%; height: 100%;
+        overflow: auto; background-color: rgba(0,0,0,0.7);
+    }
+    .modal-content {
+        background-color: var(--card-bg); margin: 10% auto;
+        padding: 30px; border: 1px solid var(--border-color);
+        width: 90%; max-width: 500px; border-radius: 12px;
+        position: relative;
+    }
+    .close-button {
+        color: #aaa; position: absolute; top: 15px; right: 25px;
+        font-size: 28px; font-weight: bold; cursor: pointer;
+    }
+    /* 알림 메시지 스타일 */
+    .toast-notification {
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        z-index: 9999;
+        padding: 15px 20px;
+        border-radius: 8px;
+        color: white;
+        font-weight: bold;
+        opacity: 0;
+        transform: translateX(100%);
+        transition: all 0.3s ease;
+    }
+    .toast-notification.show {
+        opacity: 1;
+        transform: translateX(0);
+    }
+    .toast-success {
+        background-color: #28a745;
+    }
+    .toast-error {
+        background-color: #dc3545;
+    }
+    /* 로딩 스피너 */
+    .loading-spinner {
+        display: none;
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 9999;
+        width: 50px;
+        height: 50px;
+        border: 5px solid #f3f3f3;
+        border-top: 5px solid #00a6da;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+    }
+    @keyframes spin {
+        0% { transform: translate(-50%, -50%) rotate(0deg); }
+        100% { transform: translate(-50%, -50%) rotate(360deg); }
+    }
+</style>
+
+<div class="header">
+    <h1>거래내역 분류</h1>
+    <p>엑셀 파일을 업로드하여 거래내역을 추가하거나, 기존 내역을 관리하세요.</p>
+</div>
+
+<div class="card">
+    <h3>새 거래내역 업로드</h3>
+    
+    <!-- 파일 형식 안내 -->
+    <div class="alert alert-info-custom" style="padding: 15px; border-radius: 8px; margin-bottom: 15px;">
+        <div style="display: flex; align-items: center; margin-bottom: 10px;">
+            <span style="font-size: 1.2em; margin-right: 8px;">📋</span>
+            <strong>엑셀 파일 형식 안내</strong>
+        </div>
+        
+        <div class="excel-example">
+            <div class="excel-header">Excel 파일 예시</div>
+            <table class="excel-table">
+                <thead>
+                    <tr>
+                        <th>거래일시</th>
+                        <th>거래처</th>
+                        <th>출금액</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>2025-01-15</td>
+                        <td>스타벅스 강남점</td>
+                        <td>4500</td>
+                    </tr>
+                    <tr>
+                        <td>2025-01-16</td>
+                        <td>GS25 편의점</td>
+                        <td>12000</td>
+                    </tr>
+                    <tr>
+                        <td>2025-01-17</td>
+                        <td>맥도날드</td>
+                        <td>8900</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        
+        <div style="margin-top: 15px;">
+            <strong>인식 가능한 열 제목들:</strong>
+            <div class="format-options">
+                <span class="format-tag">거래일시</span>
+                <span class="format-tag">거래일자</span>
+                <span class="format-tag">사용일</span>
+                <span class="format-tag">거래처</span>
+                <span class="format-tag">거래내용</span>
+                <span class="format-tag">가맹점명</span>
+                <span class="format-tag">출금액</span>
+                <span class="format-tag">사용금액</span>
+                <span class="format-tag">거래금액</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- 주의사항 -->
+    <div class="alert alert-warning-custom" style="padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+        <div style="display: flex; align-items: center; margin-bottom: 10px;">
+            <span style="font-size: 1.2em; margin-right: 8px;">⚠️</span>
+            <strong>업로드 전 확인사항</strong>
+        </div>
+        
+        <ul class="warning-list">
+            <li>
+                <strong>날짜 형식:</strong> 
+                <span class="code">YYYY-MM-DD</span> 또는 
+                <span class="code">YYYY/MM/DD</span> 형태로 입력
+                <br><small>예: 2025-01-15, 2025/01/15</small>
+            </li>
+            <li>
+                <strong>금액 입력:</strong> 
+                숫자만 입력하세요 (콤마 있어도 자동 처리됩니다)
+                <br><small>예: 4500, 12,000, 1234567</small>
+            </li>
+            <li>
+                <strong>헤더 필수:</strong> 
+                첫 번째 행은 반드시 열 제목이어야 합니다
+            </li>
+            <li>
+                <strong>파일 형식:</strong> 
+                Excel (.xlsx) 또는 CSV (.csv) 파일만 지원
+            </li>
+        </ul>
+    </div>
+    
+    <form method="POST" action="{{ url_for('show_results') }}" enctype="multipart/form-data">
+        <div class="form-group">
+            <label for="file">엑셀(xlsx) 또는 CSV 파일</label>
+            <input type="file" name="file" id="file" class="form-control" accept=".xlsx, .csv">
+        </div>
+        
+        <div class="form-group" style="display: flex; gap: 10px; margin-top: 1.5rem;">
+            <button type="submit" name="action" value="append" class="btn btn-success">파일 추가</button>
+            <button type="submit" name="action" value="upload" class="btn btn-danger" 
+                    onclick="return confirm('기존 데이터를 모두 삭제하고 새 파일로 교체하시겠습니까? 이 작업은 되돌릴 수 없습니다.');">
+                전체 교체
+            </button>
+        </div>
+    </form>
+</div>
+
+<div class="card mt-4">
+    <h3>거래내역 목록</h3>
+
+    <div style="margin-bottom: 1.5rem;">
+        <div class="filter-group" style="margin-bottom: 15px;">
+            <span class="filter-group-title">월별:</span>
+            <button class="btn btn-sm filter-btn month-filter {{ 'btn-active' if not selected_month else 'btn-secondary' }}" 
+                    data-type="month" data-value="">전체</button>
+            {% for month in available_months %}
+            <button class="btn btn-sm filter-btn month-filter {{ 'btn-active' if month == selected_month else 'btn-secondary' }}" 
+                    data-type="month" data-value="{{ month }}">{{ month }}</button>
+            {% endfor %}
+        </div>
+        <div class="filter-group">
+            <span class="filter-group-title">카테고리:</span>
+            <button class="btn btn-sm filter-btn category-filter {{ 'btn-active' if not active_filter else 'btn-secondary' }}" 
+                    data-type="category" data-value="">전체</button>
+            {% for category in unique_categories %}
+            <button class="btn btn-sm filter-btn category-filter {{ 'btn-active' if category == active_filter else 'btn-secondary' }}" 
+                    data-type="category" data-value="{{ category }}">{{ category }}</button>
+            {% endfor %}
+        </div>
+    </div>
+
+    <!-- 전체선택/선택삭제 버튼 추가 (테이블 위에) -->
+    <div style="margin-bottom: 15px;">
+        <button type="button" id="select-all-btn" class="btn btn-secondary btn-sm">전체선택</button>
+        <button type="button" id="delete-selected-btn" class="btn btn-danger btn-sm" style="margin-left: 10px;">선택삭제</button>
+        <span id="selected-count" style="margin-left: 15px; color: #ccc;">선택된 항목: 0개</span>
+    </div>
+
+    <div id="table-container">
+        <div class="table-responsive" style="margin-top: 20px;">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th style="width: 40px;">
+                            <input type="checkbox" id="master-checkbox">
+                        </th>
+                        <th>날짜</th>
+                        <th>거래처명</th>
+                        <th>금액</th>
+                        <th>카테고리</th>
+                        <th style="text-align: right;">관리</th>
+                    </tr>
+                </thead>
+                <tbody id="records-tbody">
+                    {% for record in records %}
+                    <tr id="record-{{ record.id }}">
+                        <td>
+                            <input type="checkbox" class="record-checkbox" value="{{ record.id }}">
+                        </td>
+                        <td data-label="날짜">{{ record['날짜'] }}</td>
+                        <td data-label="거래처명">{{ record['거래처명'] }}</td>
+                        <td data-label="금액">{{ '{:,.0f}'.format(record['금액']) }} 원</td>
+                        <td data-label="카테고리">{{ record['카테고리'] }}</td>
+                        <td style="text-align: right; white-space: nowrap;">
+                            <button class="btn btn-primary btn-sm edit-btn"
+                                    data-id="{{ record.id }}"
+                                    data-date="{{ record['날짜'] }}"
+                                    data-merchant="{{ record['거래처명'] }}"
+                                    data-amount="{{ record['금액'] }}"
+                                    data-category="{{ record['카테고리'] }}">
+                                수정
+                            </button>
+                            <button class="btn btn-danger btn-sm single-delete-btn" 
+                                    data-id="{{ record.id }}"
+                                    data-month="{{ selected_month or '' }}"
+                                    data-category="{{ active_filter or '' }}"
+                                    style="margin-left: 5px;">
+                                삭제
+                            </button>
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="6" style="text-align: center; padding: 20px;">표시할 데이터가 없습니다.</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<div id="edit-modal" class="modal">
+    <div class="modal-content">
+        <span class="close-button">&times;</span>
+        <h3>거래내역 수정</h3>
+        <form id="edit-form" method="POST">
+            <input type="hidden" name="month_filter" value="{{ selected_month or '' }}">
+            <input type="hidden" name="category_filter" value="{{ active_filter or '' }}">
+            <div class="form-group">
+                <label for="edit-date">날짜</label>
+                <input type="date" id="edit-date" name="date" class="form-control" required>
+            </div>
+            <div class="form-group">
+                <label for="edit-merchant">거래처명</label>
+                <input type="text" id="edit-merchant" name="merchant" class="form-control" required>
+            </div>
+            <div class="form-group">
+                <label for="edit-amount">금액</label>
+                <input type="number" id="edit-amount" name="amount" class="form-control" required>
+            </div>
+            <div class="form-group">
+                <label for="edit-category">카테고리</label>
+                <input type="text" id="edit-category" name="category" class="form-control" required>
+            </div>
+            <button type="submit" class="btn btn-primary">저장</button>
+        </form>
+    </div>
+</div>
+
+<!-- 로딩 스피너 -->
+<div id="loading-spinner" class="loading-spinner"></div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    let currentMonthFilter = '{{ selected_month or "" }}';
+    let currentCategoryFilter = '{{ active_filter or "" }}';
+
+    // 알림 메시지 표시 함수
+    function showToast(message, type = 'success') {
+        const toast = document.createElement('div');
+        toast.className = `toast-notification toast-${type}`;
+        toast.textContent = message;
+        document.body.appendChild(toast);
+        
+        setTimeout(() => toast.classList.add('show'), 100);
+        setTimeout(() => {
+            toast.classList.remove('show');
+            setTimeout(() => toast.remove(), 300);
+        }, 3000);
+    }
+
+    // 로딩 스피너 함수
+    function showLoading() {
+        document.getElementById('loading-spinner').style.display = 'block';
+    }
+
+    function hideLoading() {
+        document.getElementById('loading-spinner').style.display = 'none';
+    }
+
+    // 필터 버튼 클릭 처리
+    function handleFilterClick(button) {
+        const filterType = button.dataset.type;
+        const filterValue = button.dataset.value;
+
+        // 현재 필터 상태 업데이트
+        if (filterType === 'month') {
+            currentMonthFilter = filterValue;
+        } else if (filterType === 'category') {
+            currentCategoryFilter = filterValue;
+        }
+
+        // 버튼 활성화 상태 업데이트
+        if (filterType === 'month') {
+            document.querySelectorAll('.month-filter').forEach(btn => {
+                btn.classList.remove('btn-active');
+                btn.classList.add('btn-secondary');
+            });
+        } else {
+            document.querySelectorAll('.category-filter').forEach(btn => {
+                btn.classList.remove('btn-active');
+                btn.classList.add('btn-secondary');
+            });
+        }
+        
+        button.classList.remove('btn-secondary');
+        button.classList.add('btn-active');
+
+        // AJAX로 필터링된 데이터 로드
+        loadFilteredData();
+    }
+
+    // 필터링된 데이터 로드 함수
+    function loadFilteredData() {
+        showLoading();
+        
+        const url = new URL('/classify', window.location.origin);
+        if (currentMonthFilter) url.searchParams.set('month_filter', currentMonthFilter);
+        if (currentCategoryFilter) url.searchParams.set('category_filter', currentCategoryFilter);
+
+        fetch(url)
+            .then(response => response.text())
+            .then(html => {
+                // 새 HTML에서 테이블 부분만 추출
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(html, 'text/html');
+                const newTbody = doc.querySelector('#records-tbody');
+                
+                if (newTbody) {
+                    document.querySelector('#records-tbody').innerHTML = newTbody.innerHTML;
+                    
+                    // 이벤트 리스너 다시 바인딩
+                    bindEventListeners();
+                    updateSelectedCount();
+                }
+                hideLoading();
+            })
+            .catch(error => {
+                hideLoading();
+                showToast('데이터 로드 중 오류가 발생했습니다.', 'error');
+            });
+    }
+
+    // 이벤트 리스너 바인딩 함수
+    function bindEventListeners() {
+        // 수정 버튼 이벤트
+        document.querySelectorAll('.edit-btn').forEach(button => {
+            button.addEventListener('click', function() {
+                const id = this.dataset.id;
+                const date = this.dataset.date;
+                const merchant = this.dataset.merchant;
+                const amount = this.dataset.amount;
+                const category = this.dataset.category;
+
+                document.getElementById('edit-form').action = `/edit_transaction/${id}`;
+                document.getElementById('edit-date').value = date;
+                document.getElementById('edit-merchant').value = merchant;
+                document.getElementById('edit-amount').value = amount;
+                document.getElementById('edit-category').value = category;
+
+                document.getElementById('edit-modal').style.display = 'block';
+            });
+        });
+
+        // 개별 삭제 버튼 이벤트
+        document.querySelectorAll('.single-delete-btn').forEach(button => {
+            button.addEventListener('click', function() {
+                if (!confirm('정말 이 항목을 삭제하시겠습니까?')) {
+                    return;
+                }
+
+                const itemId = this.dataset.id;
+                fetch(`/delete_item/${itemId}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: `month_filter=${currentMonthFilter}&category_filter=${currentCategoryFilter}`
+                })
+                .then(response => {
+                    if (response.ok) {
+                        const row = document.getElementById(`record-${itemId}`);
+                        if (row) row.remove();
+                        updateSelectedCount();
+                        showToast('항목이 삭제되었습니다.');
+                    } else {
+                        showToast('삭제 중 오류가 발생했습니다.', 'error');
+                    }
+                })
+                .catch(error => {
+                    showToast('삭제 중 오류가 발생했습니다.', 'error');
+                });
+            });
+        });
+
+        // 체크박스 이벤트
+        const recordCheckboxes = document.querySelectorAll('.record-checkbox');
+        recordCheckboxes.forEach(checkbox => {
+            checkbox.addEventListener('change', function() {
+                const allChecked = Array.from(recordCheckboxes).every(cb => cb.checked);
+                const anyChecked = Array.from(recordCheckboxes).some(cb => cb.checked);
+                
+                const masterCheckbox = document.getElementById('master-checkbox');
+                if (masterCheckbox) {
+                    masterCheckbox.checked = allChecked;
+                    masterCheckbox.indeterminate = anyChecked && !allChecked;
+                }
+                updateSelectedCount();
+            });
+        });
+    }
+
+    // 선택된 항목 수 업데이트
+    function updateSelectedCount() {
+        const checkedBoxes = document.querySelectorAll('.record-checkbox:checked');
+        document.getElementById('selected-count').textContent = `선택된 항목: ${checkedBoxes.length}개`;
+        document.getElementById('delete-selected-btn').disabled = checkedBoxes.length === 0;
+    }
+
+    // 초기 이벤트 리스너 설정
+    // 필터 버튼들
+    document.querySelectorAll('.filter-btn').forEach(button => {
+        button.addEventListener('click', function() {
+            handleFilterClick(this);
+        });
+    });
+
+    // 기존 수정 모달 기능
+    const modal = document.getElementById('edit-modal');
+    const closeButton = document.querySelector('.close-button');
+
+    closeButton.onclick = function() {
+        modal.style.display = 'none';
+    }
+
+    window.onclick = function(event) {
+        if (event.target == modal) {
+            modal.style.display = 'none';
+        }
+    }
+
+    // 마스터 체크박스
+    const masterCheckbox = document.getElementById('master-checkbox');
+    if (masterCheckbox) {
+        masterCheckbox.addEventListener('change', function() {
+            document.querySelectorAll('.record-checkbox').forEach(checkbox => {
+                checkbox.checked = this.checked;
+            });
+            updateSelectedCount();
+        });
+    }
+
+    // 전체선택 버튼
+    document.getElementById('select-all-btn').addEventListener('click', function() {
+        const recordCheckboxes = document.querySelectorAll('.record-checkbox');
+        const allChecked = Array.from(recordCheckboxes).every(cb => cb.checked);
+        recordCheckboxes.forEach(checkbox => {
+            checkbox.checked = !allChecked;
+        });
+        if (masterCheckbox) {
+            masterCheckbox.checked = !allChecked;
+            masterCheckbox.indeterminate = false;
+        }
+        updateSelectedCount();
+        this.textContent = allChecked ? '전체선택' : '선택해제';
+    });
+
+    // 선택삭제 버튼
+    document.getElementById('delete-selected-btn').addEventListener('click', function() {
+        const checkedBoxes = document.querySelectorAll('.record-checkbox:checked');
+        if (checkedBoxes.length === 0) {
+            alert('삭제할 항목을 선택해주세요.');
+            return;
+        }
+
+        if (!confirm(`선택한 ${checkedBoxes.length}개 항목을 삭제하시겠습니까?`)) {
+            return;
+        }
+
+        const idsToDelete = Array.from(checkedBoxes).map(cb => cb.value);
+        
+        fetch('/delete_multiple', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                ids: idsToDelete,
+                month_filter: currentMonthFilter,
+                category_filter: currentCategoryFilter
+            })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                idsToDelete.forEach(id => {
+                    const row = document.getElementById(`record-${id}`);
+                    if (row) row.remove();
+                });
+                updateSelectedCount();
+                showToast(`${idsToDelete.length}개 항목이 삭제되었습니다.`);
+            } else {
+                showToast('삭제 중 오류가 발생했습니다: ' + data.message, 'error');
+            }
+        })
+        .catch(error => {
+            showToast('삭제 중 오류가 발생했습니다.', 'error');
+        });
+    });
+
+    // 초기 이벤트 바인딩 및 상태 설정
+    bindEventListeners();
+    updateSelectedCount();
+});
+</script>
+{% endblock %}

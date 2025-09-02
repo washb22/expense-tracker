@@ -1,0 +1,279 @@
+{% extends "layout.html" %}
+
+{% block title %}대시보드{% endblock %}
+
+{% block content %}
+<div class="header" style="display: flex; justify-content: space-between; align-items: flex-start;">
+    <div>
+        <h1>대시보드</h1>
+        <p>월별 재정 현황을 한눈에 파악하세요.</p>
+    </div>
+    <div>
+        <a id="export-btn" href="{{ url_for('export_excel', month=selected_month, start_date=start_date, end_date=end_date) }}" class="btn btn-success">엑셀로 내보내기</a>
+    </div>
+</div>
+
+<div class="month-filters">
+    <button id="date-range-btn" class="btn btn-primary">기간 설정</button>
+
+    {% for month in available_months %}
+    <a href="{{ url_for('index', month=month) }}" class="btn {{ 'btn-active' if selected_month == month else 'btn-secondary' }}">{{ month }}</a>
+    {% endfor %}
+</div>
+
+<div id="date-range-modal" class="modal">
+    <div class="modal-content">
+        <span class="close-button">&times;</span>
+        <h3>기간 설정</h3>
+        <form action="{{ url_for('index') }}" method="get" class="date-range-form">
+            <div class="form-group">
+                <label for="start_date">시작일:</label>
+                <input type="date" id="start_date" name="start_date" value="{{ start_date or '' }}">
+            </div>
+            <div class="form-group">
+                <label for="end_date">종료일:</label>
+                <input type="date" id="end_date" name="end_date" value="{{ end_date or '' }}">
+            </div>
+            <button type="submit" class="btn btn-primary">조회</button>
+        </form>
+    </div>
+</div>
+
+
+<div class="summary-cards">
+    <div class="card total-expense-card">
+        <h3>총 지출</h3>
+        <p>{{ '{:,.0f}'.format(total_expense) }} 원</p>
+    </div>
+    {% for category, total in category_totals.items() %}
+    <div class="card">
+        <h3>{{ category }}</h3>
+        <p>{{ '{:,.0f}'.format(total) }} 원</p>
+    </div>
+    {% endfor %}
+</div>
+
+<div class="main-content">
+    <div class="chart-container card">
+        <h3>카테고리별 지출 현황</h3>
+        <canvas id="expenseChart"></canvas>
+    </div>
+    <div class="details-container card">
+        <h3>카테고리별 사용금액</h3>
+        <div class="category-buttons">
+            {% for category in category_totals.keys() %}
+            <button class="category-btn" data-category="{{ category }}">{{ category }}</button>
+            {% endfor %}
+        </div>
+        <div id="details-content-container">
+            <p>위 카테고리를 클릭하여 상세 내역을 확인하세요.</p>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.0.0"></script>
+
+<style>
+    .month-filters {
+        margin-bottom: 30px;
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        align-items: center;
+    }
+    .month-filters .btn {
+        text-decoration: none;
+    }
+    /* 모달 스타일 */
+    .modal {
+        display: none; 
+        position: fixed; 
+        z-index: 1000; 
+        left: 0;
+        top: 0;
+        width: 100%; 
+        height: 100%; 
+        overflow: auto; 
+        background-color: rgba(0,0,0,0.6);
+    }
+    .modal-content {
+        background-color: var(--card-bg);
+        margin: 15% auto;
+        padding: 30px;
+        border: 1px solid var(--border-color);
+        width: 80%;
+        max-width: 400px;
+        border-radius: 12px;
+        position: relative;
+    }
+    .close-button {
+        color: #aaa;
+        position: absolute;
+        top: 15px;
+        right: 20px;
+        font-size: 28px;
+        font-weight: bold;
+        cursor: pointer;
+    }
+    .date-range-form input[type="date"] {
+        background-color: #3e3e3e;
+        color: #fff;
+        border: 1px solid var(--border-color);
+        border-radius: 4px;
+        padding: 8px;
+        width: 100%;
+    }
+    .merchant-summary {
+        cursor: pointer;
+        transition: background-color 0.2s;
+    }
+    .merchant-summary:hover {
+        background-color: #3e3e3e;
+    }
+    .merchant-summary td:first-child {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    .arrow-icon {
+        transition: transform 0.3s ease;
+        font-size: 0.8em;
+    }
+    .arrow-icon.open {
+        transform: rotate(180deg);
+    }
+    .merchant-details td {
+        padding: 0 !important;
+        border: none;
+    }
+    .table-nested {
+        width: 100%;
+        margin: 0;
+        background-color: #3a3a3a;
+    }
+    .table-nested td {
+        padding: 8px 25px;
+        border: none;
+    }
+    .table-nested tr:not(:last-child) td {
+        border-bottom: 1px solid #4f4f4f;
+    }
+</style>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    // --- 모달 로직 ---
+    const modal = document.getElementById("date-range-modal");
+    const btn = document.getElementById("date-range-btn");
+    const span = document.getElementsByClassName("close-button")[0];
+    btn.onclick = function() {
+      modal.style.display = "block";
+    }
+    span.onclick = function() {
+      modal.style.display = "none";
+    }
+    window.onclick = function(event) {
+      if (event.target == modal) {
+        modal.style.display = "none";
+      }
+    }
+
+    // --- 차트 생성 로직 ---
+    const ctx = document.getElementById('expenseChart').getContext('2d');
+    const categoryData = {{ category_totals | tojson }};
+    const sortedData = Object.entries(categoryData).sort(([,a],[,b]) => b-a);
+    const labels = sortedData.map(item => item[0]);
+    const data = sortedData.map(item => item[1]);
+    Chart.register(ChartDataLabels);
+    if (labels.length > 0) {
+        const maxValue = Math.max(...data);
+        const suggestedMax = maxValue * 1.15; 
+        new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: '지출액',
+                    data: data,
+                    backgroundColor: 'rgba(0, 166, 218, 0.7)', 
+                    borderColor: 'rgba(0, 166, 218, 1)',   
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                indexAxis: 'y', 
+                responsive: true,
+                maintainAspectRatio: false,
+                layout: { padding: { right: 40, bottom: 10 } },
+                plugins: {
+                    legend: { display: false },
+                    datalabels: {
+                        formatter: (value, ctx) => {
+                            const sum = ctx.chart.data.datasets[0].data.reduce((a, b) => a + b, 0);
+                            return (value * 100 / sum).toFixed(1) + '%';
+                        },
+                        color: '#fff',
+                        anchor: 'end',
+                        align: 'end',
+                        font: { weight: 'bold' }
+                    }
+                },
+                scales: {
+                    x: { ticks: { color: '#e0e0e0' }, suggestedMax: suggestedMax },
+                    y: { ticks: { color: '#e0e0e0' } }
+                }
+            }
+        });
+    } else {
+        document.querySelector('.chart-container').innerHTML += '<p style="text-align: center; color: #888; margin-top: 20px;">표시할 데이터가 없습니다.</p>';
+    }
+
+    // --- 카테고리 클릭 시 상세 내역 표시 로직 ---
+    const categoryDetails = {{ category_details | tojson }};
+    const buttons = document.querySelectorAll('.category-btn');
+    const detailsContainer = document.getElementById('details-content-container');
+    buttons.forEach(button => {
+        button.addEventListener('click', function () {
+            const category = this.dataset.category;
+            const merchants = categoryDetails[category];
+            detailsContainer.innerHTML = '';
+            if (merchants && Object.keys(merchants).length > 0) {
+                const table = document.createElement('table');
+                table.className = 'table table-dark table-striped';
+                table.innerHTML = `<thead><tr><th>거래처명</th><th>총 사용금액</th></tr></thead>`;
+                const tbody = document.createElement('tbody');
+                table.appendChild(tbody);
+                for (const merchantName in merchants) {
+                    const merchantData = merchants[merchantName];
+                    const summaryRow = tbody.insertRow();
+                    summaryRow.className = 'merchant-summary';
+                    summaryRow.innerHTML = `<td><span>${merchantName}</span><span class="arrow-icon">▼</span></td><td>${merchantData.total.toLocaleString()} 원</td>`;
+                    const detailsRow = tbody.insertRow();
+                    detailsRow.className = 'merchant-details';
+                    detailsRow.style.display = 'none';
+                    const detailsCell = detailsRow.insertCell();
+                    detailsCell.colSpan = 2;
+                    let detailsHtml = '<table class="table-nested"><tbody>';
+                    merchantData.transactions.forEach(t => {
+                        detailsHtml += `<tr><td>${t['날짜']}</td><td>${t['거래처명']}</td><td>${t['금액'].toLocaleString()} 원</td></tr>`;
+                    });
+                    detailsHtml += '</tbody></table>';
+                    detailsCell.innerHTML = detailsHtml;
+                    summaryRow.addEventListener('click', () => {
+                        const isVisible = detailsRow.style.display === 'table-row';
+                        detailsRow.style.display = isVisible ? 'none' : 'table-row';
+                        summaryRow.querySelector('.arrow-icon').classList.toggle('open');
+                    });
+                }
+                detailsContainer.appendChild(table);
+            } else {
+                detailsContainer.innerHTML = `<p>${category} 카테고리에 해당하는 내역이 없습니다.</p>`;
+            }
+            buttons.forEach(btn => btn.classList.remove('active'));
+            this.classList.add('active');
+        });
+    });
+});
+</script>
+{% endblock %}

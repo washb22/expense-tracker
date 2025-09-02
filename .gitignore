@@ -1,0 +1,11 @@
+# Environments
+.env
+venv/
+.venv/
+
+# Instance folder
+/instance/
+
+# Python cache
+__pycache__/
+*.pyc

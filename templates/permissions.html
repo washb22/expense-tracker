@@ -1,0 +1,36 @@
+{% extends "layout.html" %}
+
+{% block title %}멤버 권한 설정{% endblock %}
+
+{% block content %}
+<div class="header">
+    <h1>멤버 권한 설정</h1>
+    <p><strong>{{ member.username }}</strong>님의 사업장 내 메뉴 접근 권한을 설정합니다.</p>
+</div>
+
+<div class="card">
+    <form method="POST" action="{{ url_for('manage_permissions', workspace_id=workspace.id, user_id=member.id) }}">
+        <div class="form-group">
+            <p style="margin-bottom: 1.5rem; color: var(--text-muted);">
+                선택된 메뉴만 해당 직원에게 표시됩니다. '사업장 설정' 메뉴는 모든 직원에게 기본으로 표시됩니다.
+            </p>
+            
+            <div class="permission-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 1rem;">
+                {% for menu_key, menu_display in available_menus.items() %}
+                <div class="permission-item" style="background-color: #3e3e3e; padding: 15px; border-radius: 8px; display: flex; align-items: center;">
+                    <input type="checkbox" id="menu_{{ menu_key }}" name="menu_permissions" value="{{ menu_key }}" 
+                           {% if menu_key in user_permissions %}checked{% endif %}
+                           style="width: 20px; height: 20px; margin-right: 12px; accent-color: var(--active-color);">
+                    <label for="menu_{{ menu_key }}" style="font-size: 1.1em; cursor: pointer;">{{ menu_display }}</label>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <div class="form-actions" style="margin-top: 2rem; display: flex; gap: 10px;">
+            <button type="submit" class="btn btn-success">권한 저장</button>
+            <a href="{{ url_for('manage_members', workspace_id=workspace.id) }}" class="btn btn-secondary">취소하고 돌아가기</a>
+        </div>
+    </form>
+</div>
+{% endblock %}
