@@ -53,6 +53,8 @@
         <h3>매출 총이익</h3>
         <p>{{ '{:,.0f}'.format(gross_profit) }} 원</p>
     </div>
+
+    {% if active_membership.role in ['owner', 'admin'] %}
     <div class="card" style="background: linear-gradient(135deg, #ffc107, #e0a800); color: #333;">
         <h3>총 지출</h3>
         <p>{{ '{:,.0f}'.format(total_expenses) }} 원</p>
@@ -62,6 +64,7 @@
         <h3>순이익</h3>
         <p>{{ '{:,.0f}'.format(net_profit) }} 원</p>
     </div>
+    {% endif %}
 </div>
 
 <!-- 메인 콘텐츠 -->
