@@ -779,25 +779,139 @@ def add_sale(membership):
     except Exception as e: flash(f'오류가 발생했습니다: {str(e)}', 'error')
     return redirect(url_for('business_sales'))
 
+
+# ❗️❗️❗️ upload_sales 함수를 아래 코드로 통째로 교체해주세요.
 @app.route('/business/sales/upload', methods=['POST'])
 @login_required
 @role_required(menu='business_sales')
 def upload_sales(membership):
-    # This function is now also protected
     workspace_id = membership.workspace_id
-    # ... (rest of the logic is the same)
-    return jsonify({'success': True, 'message': 'Upload successful'})
+    file = request.files.get('file')
+    if not file:
+        return jsonify({'success': False, 'message': '파일이 없습니다.'})
 
+    try:
+        df = pd.read_excel(file, engine='openpyxl') if file.filename.endswith('.xlsx') else pd.read_csv(file)
+        
+        products_map = {p.name: p for p in Product.query.filter_by(workspace_id=workspace_id).all()}
+        platforms_map = {p.name: p for p in Platform.query.filter_by(workspace_id=workspace_id).all()}
+        
+        success_count = 0
+        fail_count = 0
+        error_messages = []
+        new_sales_to_add = [] # 임시 저장 리스트
+
+        for index, row in df.iterrows():
+            product_name = str(row.get('제품명', '')).strip()
+            platform_name = str(row.get('판매채널', '')).strip()
+            
+            product = products_map.get(product_name)
+            platform = platforms_map.get(platform_name)
+
+            if not product:
+                fail_count += 1
+                error_messages.append(f"{index+2}번째 줄 오류: 제품 '{product_name}'을(를) 찾을 수 없습니다.")
+                continue
+            if not platform:
+                fail_count += 1
+                error_messages.append(f"{index+2}번째 줄 오류: 판매채널 '{platform_name}'을(를) 찾을 수 없습니다.")
+                continue
+
+            try:
+                selling_price = int(row.get('실제판매가', 0))
+                quantity = int(row.get('수량', 1))
+                date_str = str(row.get('판매일'))
+                sale_date = pd.to_datetime(date_str).to_pydatetime()
+
+                total_selling_amount = selling_price
+                total_cost_amount = product.cost_price * quantity
+                commission_amount = int(total_selling_amount * platform.commission_rate / 100)
+                net_profit = total_selling_amount - total_cost_amount - commission_amount
+
+                new_sale = Sale(
+                    date=sale_date, product_id=product.id, platform_id=platform.id,
+                    selling_price=selling_price, quantity=quantity,
+                    total_selling_amount=total_selling_amount, total_cost_amount=total_cost_amount,
+                    commission_amount=commission_amount, net_profit=net_profit,
+                    workspace_id=workspace_id
+                )
+                new_sales_to_add.append(new_sale)
+                success_count += 1
+            except Exception as e:
+                fail_count += 1
+                error_messages.append(f"{index+2}번째 줄 오류: 날짜나 숫자 형식이 올바르지 않습니다.")
+
+        # 모든 줄을 검사한 후, 오류가 하나도 없을 때만 DB에 최종 저장
+        if fail_count > 0:
+            db.session.rollback() # 혹시 모르니 롤백
+            return jsonify({'success': False, 'message': f"업로드 실패! {fail_count}개의 오류를 먼저 해결해주세요.", 'errors': error_messages})
+        else:
+            db.session.add_all(new_sales_to_add)
+            db.session.commit()
+            return jsonify({'success': True, 'message': f'{success_count}개 매출이 성공적으로 추가되었습니다!'})
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': f'파일 처리 중 예상치 못한 오류 발생: {str(e)}'})
+
+
+# ❗️❗️❗️ replace_all_sales 함수도 아래의 안전한 코드로 통째로 교체해주세요.
 @app.route('/business/sales/replace_all', methods=['POST'])
 @login_required
 @role_required(menu='business_sales')
 def replace_all_sales(membership):
-    # This function is now also protected
     workspace_id = membership.workspace_id
-    Sale.query.filter_by(workspace_id=workspace_id).delete()
-    db.session.commit()
-    # ... (rest of the logic is the same as upload_sales)
-    return jsonify({'success': True, 'message': 'Replace successful'})
+    file = request.files.get('file')
+    if not file:
+        return jsonify({'success': False, 'message': '파일이 없습니다.'})
+    
+    # 엑셀 파일의 모든 데이터가 유효한지 먼저 끝까지 검사
+    try:
+        df = pd.read_excel(file, engine='openpyxl') if file.filename.endswith('.xlsx') else pd.read_csv(file)
+        products_map = {p.name: p for p in Product.query.filter_by(workspace_id=workspace_id).all()}
+        platforms_map = {p.name: p for p in Platform.query.filter_by(workspace_id=workspace_id).all()}
+        
+        fail_count = 0
+        error_messages = []
+        
+        # 1단계: 유효성 검사만 먼저 수행
+        for index, row in df.iterrows():
+            product_name = str(row.get('제품명', '')).strip()
+            platform_name = str(row.get('판매채널', '')).strip()
+            if not products_map.get(product_name) or not platforms_map.get(platform_name):
+                fail_count += 1
+                error_messages.append(f"{index+2}번째 줄: 제품 또는 판매채널 이름을 찾을 수 없습니다.")
+                continue
+            try:
+                int(row.get('실제판매가', 0)); int(row.get('수량', 1)); pd.to_datetime(str(row.get('판매일')))
+            except:
+                fail_count += 1
+                error_messages.append(f"{index+2}번째 줄: 날짜 또는 숫자 형식을 확인해주세요.")
+
+        # 2단계: 오류가 하나도 없을 때만 삭제 및 추가 진행
+        if fail_count > 0:
+            return jsonify({'success': False, 'message': f"업로드 실패! {fail_count}개의 오류를 먼저 해결해주세요.", 'errors': error_messages})
+        else:
+            Sale.query.filter_by(workspace_id=workspace_id).delete()
+            for _, row in df.iterrows():
+                product = products_map[str(row.get('제품명')).strip()]
+                platform = platforms_map[str(row.get('판매채널')).strip()]
+                selling_price = int(row.get('실제판매가', 0))
+                quantity = int(row.get('수량', 1))
+                sale_date = pd.to_datetime(str(row.get('판매일'))).to_pydatetime()
+                total_selling_amount = selling_price
+                total_cost_amount = product.cost_price * quantity
+                commission_amount = int(total_selling_amount * platform.commission_rate / 100)
+                net_profit = total_selling_amount - total_cost_amount - commission_amount
+                new_sale = Sale(date=sale_date, product_id=product.id, platform_id=platform.id, selling_price=selling_price, quantity=quantity, total_selling_amount=total_selling_amount, total_cost_amount=total_cost_amount, commission_amount=commission_amount, net_profit=net_profit, workspace_id=workspace_id)
+                db.session.add(new_sale)
+            
+            db.session.commit()
+            return jsonify({'success': True, 'message': f'데이터를 성공적으로 교체했습니다! ({len(df)}건)'})
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': f'파일 처리 중 예상치 못한 오류 발생: {str(e)}'})
 
 @app.route('/business/sales/delete/<sale_id>', methods=['POST'])
 @login_required
