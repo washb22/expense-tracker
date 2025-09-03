@@ -429,10 +429,11 @@ def edit_workspace(workspace_id):
     return redirect(url_for('manage_workspaces'))
 
 
+# ❗️❗️❗️ 기존 manage_members 함수를 아래 코드로 통째로 교체해주세요.
 @app.route('/workspace/<int:workspace_id>/members', methods=['GET', 'POST'])
 @login_required
 def manage_members(workspace_id):
-    # 1. 어떤 사업장에서 작업할지 명확하게 찾습니다.
+    # 1. URL로 들어온 특정 사업장을 정확히 찾습니다.
     workspace = Workspace.query.get_or_404(workspace_id)
     
     # 2. 현재 로그인한 사용자가 이 사업장의 관리자인지 확인합니다.
@@ -445,7 +446,7 @@ def manage_members(workspace_id):
         flash('멤버를 관리할 권한이 없습니다.', 'error')
         return redirect(url_for('manage_workspaces'))
 
-    # 3. '멤버 초대' 버튼을 눌렀을 때 (POST 요청)
+    # 3. '멤버 초대' 버튼을 눌렀을 때 (POST)
     if request.method == 'POST':
         email = request.form.get('email')
         role = request.form.get('role')
@@ -455,19 +456,17 @@ def manage_members(workspace_id):
             flash(f"'{email}' 이메일을 가진 사용자를 찾을 수 없습니다. 먼저 회원가입을 해야 합니다.", 'error')
             return redirect(url_for('manage_members', workspace_id=workspace_id))
         
-        # 4. 초대할 직원이 '이미 이 특정 사업장'에 있는지 확인합니다.
         existing_member = WorkspaceMember.query.filter_by(
             user_id=user_to_invite.id, 
-            workspace_id=workspace.id # ❗️ workspace.id를 명시
+            workspace_id=workspace.id
         ).first()
 
         if existing_member:
             flash(f"'{user_to_invite.username}'님은 이미 이 사업장의 멤버입니다.", 'warning')
         else:
-            # 5. '바로 이 특정 사업장'에만 새로운 멤버로 추가합니다.
             new_member = WorkspaceMember(
                 user_id=user_to_invite.id, 
-                workspace_id=workspace.id, # ❗️ workspace.id를 명시
+                workspace_id=workspace.id,
                 role=role
             )
             db.session.add(new_member)
@@ -476,8 +475,11 @@ def manage_members(workspace_id):
             
         return redirect(url_for('manage_members', workspace_id=workspace_id))
 
-    # 6. GET 요청일 경우, '이 특정 사업장'의 멤버 목록만 보여줍니다.
-    members = workspace.members
+    # --- ⭐️⭐️⭐️ 여기가 핵심 수정 부분입니다 ⭐️⭐️⭐️ ---
+    # 4. (GET) 페이지를 보여줄 때, DB에 직접 물어서 '이 사업장'의 멤버만 정확히 가져옵니다.
+    members = WorkspaceMember.query.filter_by(workspace_id=workspace.id).all()
+    # --- ⭐️⭐️⭐️ 수정 끝 ⭐️⭐️⭐️ ---
+    
     return render_template('members.html', 
                            workspace=workspace, 
                            members=members, 
