@@ -387,13 +387,23 @@ def manage_workspaces():
         return redirect(url_for('manage_workspaces'))
     return render_template('workspace.html', active_page='workspace')
 
+# ❗️❗️❗️ 기존 select_workspace 함수를 아래 코드로 통째로 교체해주세요.
 @app.route('/workspace/select/<int:workspace_id>')
 @login_required
 def select_workspace(workspace_id):
+    # 사용자가 해당 사업장의 멤버인지 확인
     member_check = WorkspaceMember.query.filter_by(user_id=current_user.id, workspace_id=workspace_id).first()
-    if member_check: session['active_workspace_id'] = workspace_id
-    else: flash('유효하지 않은 사업장입니다.', 'error')
-    return redirect(request.referrer or url_for('index'))
+    
+    if member_check:
+        # 멤버가 맞으면 세션에 활성 사업장 ID를 저장
+        session['active_workspace_id'] = workspace_id
+    else:
+        flash('유효하지 않은 사업장입니다.', 'error')
+    
+    # --- ⭐️⭐️⭐️ 여기가 핵심 수정 부분입니다 ⭐️⭐️⭐️ ---
+    # 이전 페이지로 돌아가는 대신, 항상 메인 대시보드로 이동시킵니다.
+    return redirect(url_for('index'))
+    # --- ⭐️⭐️⭐️ 수정 끝 ⭐️⭐️⭐️ ---
 
 @app.route('/workspace/delete/<int:workspace_id>', methods=['POST'])
 @login_required
