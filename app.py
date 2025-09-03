@@ -596,7 +596,7 @@ def show_results(membership):
 
 @app.route('/rules', methods=['GET', 'POST'])
 @login_required
-@role_required('admin', menu='rules')
+@role_required(menu='rules')
 def manage_rules(membership):
     workspace_id = membership.workspace_id
     if request.method == 'POST':
@@ -612,7 +612,7 @@ def manage_rules(membership):
 
 @app.route('/delete_rule/<int:rule_id>', methods=['POST'])
 @login_required
-@role_required('admin', menu='rules')
+@role_required(menu='rules')
 def delete_rule(rule_id, membership):
     rule_to_delete = Rule.query.get(rule_id)
     if rule_to_delete and rule_to_delete.workspace_id == membership.workspace_id:
@@ -624,7 +624,7 @@ def delete_rule(rule_id, membership):
 
 @app.route('/reclassify_all', methods=['POST'])
 @login_required
-@role_required('admin', menu='rules')
+@role_required(menu='rules')
 def reclassify_all_data(membership):
     workspace_id = membership.workspace_id
     transactions = Transaction.query.filter_by(workspace_id=workspace_id).all()
@@ -802,7 +802,7 @@ def business_sales(membership):
 
 @app.route('/business/products')
 @login_required
-@role_required('admin', menu='business_products')
+@role_required(menu='business_products') # 괄호 안의 'admin'을 삭제
 def business_products(membership):
     workspace_id = membership.workspace_id
     products = Product.query.filter_by(workspace_id=workspace_id).all()
@@ -811,7 +811,7 @@ def business_products(membership):
 
 @app.route('/business/products/add', methods=['POST'])
 @login_required
-@role_required('admin', menu='business_products')
+@role_required(menu='business_products')
 def add_product(membership):
     db.session.add(Product(name=request.form.get('name'), sku=request.form.get('sku', ''), cost_price=int(request.form.get('cost_price', 0)), category=request.form.get('category', ''), workspace_id=membership.workspace_id))
     db.session.commit()
@@ -820,7 +820,7 @@ def add_product(membership):
 
 @app.route('/business/platforms/add', methods=['POST'])
 @login_required
-@role_required('admin', menu='business_products')
+@role_required(menu='business_products')
 def add_platform(membership):
     db.session.add(Platform(name=request.form.get('name'), commission_rate=float(request.form.get('commission_rate', 0)), workspace_id=membership.workspace_id))
     db.session.commit()
@@ -1005,7 +1005,7 @@ def delete_multiple_sales(membership):
 
 @app.route('/business/products/delete/<int:product_id>', methods=['POST'])
 @login_required
-@role_required('admin', menu='business_products')
+@role_required(menu='business_products')
 def delete_product(product_id, membership):
     product = Product.query.get(product_id)
     if not product or product.workspace_id != membership.workspace_id:
@@ -1018,7 +1018,7 @@ def delete_product(product_id, membership):
 
 @app.route('/business/platforms/delete/<int:platform_id>', methods=['POST'])
 @login_required
-@role_required('admin', menu='business_products')
+@role_required(menu='business_products')
 def delete_platform(platform_id, membership):
     platform = Platform.query.get(platform_id)
     if not platform or platform.workspace_id != membership.workspace_id:
