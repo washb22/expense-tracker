@@ -58,21 +58,44 @@ def role_required(role="member", menu=None):
             user_level = roles_hierarchy.get(membership.role, 0)
             required_level = roles_hierarchy.get(role, 0)
 
-            if user_level < required_level:
-                flash("이 페이지에 접근할 권한이 없습니다.", "error")
-                return redirect(url_for('index'))
+            # --- ⭐️⭐️⭐️ 여기가 핵심 수정 부분입니다 ⭐️⭐️⭐️ ---
+            def get_user_permissions():
+                if membership.role in ['owner', 'admin']:
+                    return {'dashboard', 'classify', 'rules', 'business_dashboard', 'business_sales', 'business_products', 'manage_workspaces'}
+                else:
+                    permissions = MenuPermission.query.filter_by(user_id=current_user.id, workspace_id=active_workspace_id).all()
+                    return {p.menu_name for p in permissions}
 
-            if menu:
-                if membership.role not in ['owner', 'admin']:
-                    user_permissions = {p.menu_name for p in MenuPermission.query.filter_by(user_id=current_user.id, workspace_id=active_workspace_id).all()}
-                    if menu not in user_permissions:
-                        flash("이 메뉴에 접근할 권한이 없습니다.", "error")
-                        return redirect(url_for('index'))
+            user_permissions = get_user_permissions()
+
+            # 접근 거부 시, 사용자가 갈 수 있는 첫 페이지로 리디렉션
+            def redirect_to_fallback():
+                flash("이 페이지에 접근할 권한이 없습니다.", "error")
+                # 권한이 있는 페이지 리스트를 순서대로 확인
+                fallback_pages = ['business_dashboard', 'business_sales', 'dashboard', 'classify', 'manage_workspaces']
+                for page in fallback_pages:
+                    if page in user_permissions:
+                        # 페이지 이름에 맞는 함수(url)로 리디렉션합니다.
+                        # 'show_results'는 'classify' 페이지의 함수 이름입니다.
+                        if page == 'classify':
+                            return redirect(url_for('show_results'))
+                        return redirect(url_for(page))
+                # 어떤 페이지 권한도 없다면 사업장 관리 페이지로
+                return redirect(url_for('manage_workspaces'))
+
+            if user_level < required_level:
+                return redirect_to_fallback()
+
+            if menu and menu not in user_permissions:
+                return redirect_to_fallback()
+            # --- ⭐️⭐️⭐️ 수정 끝 ⭐️⭐️⭐️ ---
 
             kwargs['membership'] = membership
             return f(*args, **kwargs)
         return decorated_function
     return decorator
+
+# ❗️❗️❗️ [끝] 여기까지 교체하시면 됩니다 ❗️❗️❗️
 
 oauth = OAuth(app)
 oauth.register(name='google', client_id=app.config['GOOGLE_CLIENT_ID'], client_secret=app.config['GOOGLE_CLIENT_SECRET'], server_metadata_url='https://accounts.google.com/.well-known/openid-configuration', client_kwargs={'scope': 'openid email profile'})
@@ -409,29 +432,56 @@ def edit_workspace(workspace_id):
 @app.route('/workspace/<int:workspace_id>/members', methods=['GET', 'POST'])
 @login_required
 def manage_members(workspace_id):
+    # 1. 어떤 사업장에서 작업할지 명확하게 찾습니다.
     workspace = Workspace.query.get_or_404(workspace_id)
-    current_user_membership = WorkspaceMember.query.filter_by(user_id=current_user.id, workspace_id=workspace.id).first()
+    
+    # 2. 현재 로그인한 사용자가 이 사업장의 관리자인지 확인합니다.
+    current_user_membership = WorkspaceMember.query.filter_by(
+        user_id=current_user.id, 
+        workspace_id=workspace.id
+    ).first()
+
     if not current_user_membership or current_user_membership.role not in ['owner', 'admin']:
         flash('멤버를 관리할 권한이 없습니다.', 'error')
         return redirect(url_for('manage_workspaces'))
+
+    # 3. '멤버 초대' 버튼을 눌렀을 때 (POST 요청)
     if request.method == 'POST':
         email = request.form.get('email')
         role = request.form.get('role')
         user_to_invite = User.query.filter_by(email=email).first()
+
         if not user_to_invite:
             flash(f"'{email}' 이메일을 가진 사용자를 찾을 수 없습니다. 먼저 회원가입을 해야 합니다.", 'error')
             return redirect(url_for('manage_members', workspace_id=workspace_id))
-        existing_member = WorkspaceMember.query.filter_by(user_id=user_to_invite.id, workspace_id=workspace.id).first()
+        
+        # 4. 초대할 직원이 '이미 이 특정 사업장'에 있는지 확인합니다.
+        existing_member = WorkspaceMember.query.filter_by(
+            user_id=user_to_invite.id, 
+            workspace_id=workspace.id # ❗️ workspace.id를 명시
+        ).first()
+
         if existing_member:
             flash(f"'{user_to_invite.username}'님은 이미 이 사업장의 멤버입니다.", 'warning')
         else:
-            new_member = WorkspaceMember(user_id=user_to_invite.id, workspace_id=workspace.id, role=role)
+            # 5. '바로 이 특정 사업장'에만 새로운 멤버로 추가합니다.
+            new_member = WorkspaceMember(
+                user_id=user_to_invite.id, 
+                workspace_id=workspace.id, # ❗️ workspace.id를 명시
+                role=role
+            )
             db.session.add(new_member)
             db.session.commit()
             flash(f"'{user_to_invite.username}'님을 '{role}' 역할로 초대했습니다.", 'success')
+            
         return redirect(url_for('manage_members', workspace_id=workspace_id))
+
+    # 6. GET 요청일 경우, '이 특정 사업장'의 멤버 목록만 보여줍니다.
     members = workspace.members
-    return render_template('members.html', workspace=workspace, members=members, current_user_role=current_user_membership.role)
+    return render_template('members.html', 
+                           workspace=workspace, 
+                           members=members, 
+                           current_user_role=current_user_membership.role)
 
 @app.route('/workspace/<int:workspace_id>/members/delete/<int:user_id>', methods=['POST'])
 @login_required
