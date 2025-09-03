@@ -188,31 +188,39 @@ class Sale(db.Model):
 def load_user(user_id):
     return User.query.get(int(user_id))
 
+# ❗️❗️❗️ 기존 inject_workspaces 함수를 아래 코드로 통째로 교체해주세요.
 @app.context_processor
 def inject_workspaces():
     if current_user.is_authenticated:
-        workspace_members = current_user.workspaces
-        active_workspace_id = session.get('active_workspace_id')
-        active_workspace = Workspace.query.get(active_workspace_id) if active_workspace_id else None
+        # 현재 유저가 소속된 모든 멤버십 정보를 가져옵니다.
+        all_memberships = WorkspaceMember.query.filter_by(user_id=current_user.id).all()
         
+        active_workspace_id = session.get('active_workspace_id')
+        active_workspace = None
         active_membership = None
         user_menu_permissions = set()
 
-        if active_workspace:
-            active_membership = WorkspaceMember.query.filter_by(user_id=current_user.id, workspace_id=active_workspace_id).first()
-            if active_membership:
-                if active_membership.role in ['owner', 'admin']:
-                    user_menu_permissions = {'dashboard', 'classify', 'rules', 'business_dashboard', 'business_sales', 'business_products', 'manage_workspaces'}
-                else:
-                    permissions = MenuPermission.query.filter_by(user_id=current_user.id, workspace_id=active_workspace_id).all()
-                    user_menu_permissions = {p.menu_name for p in permissions}
+        if active_workspace_id:
+            active_workspace = Workspace.query.get(active_workspace_id)
+            # 활성화된 멤버십 정보를 찾습니다.
+            active_membership = next((m for m in all_memberships if m.workspace_id == active_workspace_id), None)
+
+        # 활성화된 멤버십이 있을 경우에만 권한을 계산합니다.
+        if active_membership:
+            if active_membership.role in ['owner', 'admin']:
+                user_menu_permissions = {'dashboard', 'classify', 'rules', 'business_dashboard', 'business_sales', 'business_products', 'manage_workspaces'}
+            else:
+                permissions = MenuPermission.query.filter_by(user_id=current_user.id, workspace_id=active_workspace_id).all()
+                user_menu_permissions = {p.menu_name for p in permissions}
 
         return dict(
-            workspace_members=workspace_members,
+            # 템플릿에는 모든 멤버십 정보를 보내 사이드바 드롭다운을 채웁니다.
+            workspace_members=all_memberships,
             active_workspace=active_workspace,
             active_membership=active_membership,
             user_menu_permissions=user_menu_permissions
         )
+        
     return dict(workspace_members=[], active_workspace=None, active_membership=None, user_menu_permissions=set())
 
 def clean_merchant_name(name):
