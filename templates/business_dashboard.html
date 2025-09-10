@@ -50,7 +50,7 @@
         <p>{{ '{:,.0f}'.format(total_revenue) }} 원</p>
     </div>
     <div class="card" style="background: linear-gradient(135deg, #00a6da, #0088b3); color: white;">
-        <h3>총 판매수익</h3>
+        <h3>총 판매익익</h3>
         <p>{{ '{:,.0f}'.format(gross_profit) }} 원</p>
     </div>
 
@@ -82,7 +82,7 @@
                         <th>판매채널</th>
                         <th>판매가</th>
                         <th>수량</th>
-                        <th>순이익</th>
+                        <th>판매이익</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -156,7 +156,7 @@
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
                 <div>
                     <strong>매출액:</strong> {{ '{:,.0f}'.format(total_revenue) }} 원<br>
-                    <strong>매출이익:</strong> {{ '{:,.0f}'.format(gross_profit) }} 원
+                    <strong>판매이익:</strong> {{ '{:,.0f}'.format(gross_profit) }} 원
                 </div>
                 <div>
                     <strong>지출액:</strong> {{ '{:,.0f}'.format(total_expenses) }} 원<br>
