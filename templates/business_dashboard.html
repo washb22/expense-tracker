@@ -391,7 +391,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         detailsHtml += `
                             <tr>
                                 <td>${sale['판매채널']}</td>
-                                <td>단가: ${sale['판매가'].toLocaleString()}원</td>
+                                <td>판매가: ${sale['판매가'].toLocaleString()}원</td>
                                 <td>수량: ${sale['수량']}개</td>
                                 <td style="color: ${sale['순이익'] >= 0 ? '#28a745' : '#dc3545'}">
                                     순이익: ${sale['순이익'].toLocaleString()}원
