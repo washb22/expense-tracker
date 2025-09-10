@@ -50,7 +50,7 @@
         <p>{{ '{:,.0f}'.format(total_revenue) }} 원</p>
     </div>
     <div class="card" style="background: linear-gradient(135deg, #00a6da, #0088b3); color: white;">
-        <h3>매출 총이익</h3>
+        <h3>총 판매수익</h3>
         <p>{{ '{:,.0f}'.format(gross_profit) }} 원</p>
     </div>
 
@@ -354,7 +354,7 @@ document.addEventListener('DOMContentLoaded', function() {
                             <th>제품명</th>
                             <th>판매수량</th>
                             <th>매출액</th>
-                            <th>순이익</th>
+                            <th>판매이익</th>
                         </tr>
                     </thead>
                 `;
@@ -394,7 +394,7 @@ document.addEventListener('DOMContentLoaded', function() {
                                 <td>판매가: ${sale['판매가'].toLocaleString()}원</td>
                                 <td>수량: ${sale['수량']}개</td>
                                 <td style="color: ${sale['순이익'] >= 0 ? '#28a745' : '#dc3545'}">
-                                    순이익: ${sale['순이익'].toLocaleString()}원
+                                    판매이익: ${sale['순이익'].toLocaleString()}원
                                 </td>
                             </tr>
                         `;
