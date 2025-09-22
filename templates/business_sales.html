@@ -228,7 +228,33 @@
                 {% endfor %}
             </tbody>
         </table>
+   </div> {% if pagination and pagination.pages > 1 %}
+    <div class="pagination">
+        {% if pagination.has_prev %}
+            <a href="{{ url_for('business_sales', page=pagination.prev_num) }}">&laquo; 이전</a>
+        {% else %}
+            <span class="disabled">&laquo; 이전</span>
+        {% endif %}
+
+        {% for p in pagination.iter_pages(left_edge=2, right_edge=2, left_current=2, right_current=2) %}
+            {% if p %}
+                {% if p == pagination.page %}
+                    <a class="active" href="{{ url_for('business_sales', page=p) }}">{{ p }}</a>
+                {% else %}
+                    <a href="{{ url_for('business_sales', page=p) }}">{{ p }}</a>
+                {% endif %}
+            {% else %}
+                <span class="ellipsis">…</span>
+            {% endif %}
+        {% endfor %}
+
+        {% if pagination.has_next %}
+            <a href="{{ url_for('business_sales', page=pagination.next_num) }}">다음 &raquo;</a>
+        {% else %}
+            <span class="disabled">다음 &raquo;</span>
+        {% endif %}
     </div>
+    {% endif %}
     {% else %}
     <p style="text-align: center; color: #888; padding: 40px;">
         {% if selected_month or start_date %}
@@ -571,5 +597,32 @@ document.addEventListener('DOMContentLoaded', function() {
         padding: 8px;
         width: 100%;
     }
+.pagination {
+        margin-top: 25px;
+        text-align: center;
+    }
+    .pagination a, .pagination span {
+        display: inline-block;
+        padding: 8px 16px;
+        margin: 0 4px;
+        border-radius: 4px;
+        color: var(--text-color);
+        text-decoration: none;
+        transition: background-color .3s;
+        border: 1px solid var(--border-color);
+    }
+    .pagination a.active {
+        background-color: var(--active-color);
+        color: white;
+        border-color: var(--active-color);
+    }
+    .pagination a:hover:not(.active) {
+        background-color: var(--card-bg);
+    }
+    .pagination .disabled, .pagination .ellipsis {
+        color: #666;
+        border-color: #444;
+    }
+    /* ▲▲▲▲▲ 여기까지 붙여넣기 ▲▲▲▲▲ */
 </style>
 {% endblock %}

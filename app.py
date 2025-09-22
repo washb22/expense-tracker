@@ -783,22 +783,28 @@ def business_sales(membership):
     workspace_id = membership.workspace_id
     products = Product.query.filter_by(workspace_id=workspace_id).all()
     platforms = Platform.query.filter_by(workspace_id=workspace_id).all()
-    all_sales = Sale.query.filter_by(workspace_id=workspace_id).order_by(Sale.date.desc()).all()
-    if not all_sales:
-        return render_template('business_sales.html', active_page='business_sales', products=products, platforms=platforms, sales=[], available_months=[], selected_month=None, start_date=None, end_date=None, today=datetime.now().strftime('%Y-%m-%d'))
-    sales_df = pd.DataFrame([{'날짜': s.date, 'sale_obj': s} for s in all_sales])
-    sales_df['날짜'] = pd.to_datetime(sales_df['날짜'])
-    sales_df['월'] = sales_df['날짜'].dt.strftime('%Y-%m')
-    available_months = sorted(sales_df['월'].unique().tolist(), reverse=True)
-    selected_month, start_date, end_date = request.args.get('month'), request.args.get('start_date'), request.args.get('end_date')
-    sales_df_filtered = sales_df.copy()
-    if start_date and end_date:
-        sales_df_filtered = sales_df[(sales_df['날짜'] >= pd.to_datetime(start_date)) & (sales_df['날짜'] <= pd.to_datetime(end_date))]
-        selected_month = None
-    elif selected_month in available_months:
-        sales_df_filtered = sales_df[sales_df['월'] == selected_month]
-    filtered_sales = [row['sale_obj'] for _, row in sales_df_filtered.iterrows()]
-    return render_template('business_sales.html', active_page='business_sales', products=products, platforms=platforms, sales=filtered_sales, available_months=available_months, selected_month=selected_month, start_date=start_date or '', end_date=end_date or '', today=datetime.now().strftime('%Y-%m-%d'))
+
+    # --- ⭐️⭐️⭐️ 여기가 핵심 수정 부분입니다 ⭐️⭐️⭐️ ---
+    # 1. URL에서 현재 페이지 번호를 가져옵니다. (예: ?page=2) 없으면 1페이지로 시작합니다.
+    page = request.args.get('page', 1, type=int)
+    
+    # 2. 모든 매출을 한 번에 가져오는 대신, 페이지별로 50개씩 끊어서 가져옵니다.
+    pagination = Sale.query.filter_by(workspace_id=workspace_id).order_by(Sale.date.desc()).paginate(
+        page=page, per_page=50, error_out=False
+    )
+    sales_on_current_page = pagination.items
+    # --- ⭐️⭐️⭐️ 수정 끝 ⭐️⭐️⭐️ ---
+
+    if not sales_on_current_page and page == 1:
+        return render_template('business_sales.html', active_page='business_sales', products=products, platforms=platforms, sales=[], pagination=None, today=datetime.now().strftime('%Y-%m-%d'))
+
+    return render_template('business_sales.html', 
+                           active_page='business_sales', 
+                           products=products, 
+                           platforms=platforms, 
+                           sales=sales_on_current_page, 
+                           pagination=pagination,  # ❗️ 페이지네이션 객체를 템플릿으로 전달
+                           today=datetime.now().strftime('%Y-%m-%d'))
 
 @app.route('/business/products')
 @login_required
