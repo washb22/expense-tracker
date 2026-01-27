@@ -114,6 +114,8 @@ class User(UserMixin, db.Model):
     username = db.Column(db.String(80), unique=True, nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
     password_hash = db.Column(db.String(256), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    last_login = db.Column(db.DateTime)
     workspaces = db.relationship('WorkspaceMember', back_populates='user', cascade="all, delete-orphan")
     def set_password(self, password): self.password_hash = generate_password_hash(password)
     def check_password(self, password): return check_password_hash(self.password_hash, password)
@@ -309,6 +311,8 @@ def login():
             flash('사용자 이름 또는 비밀번호가 올바르지 않습니다.', 'error')
             return redirect(url_for('login'))
         login_user(user)
+        user.last_login = datetime.utcnow()
+        db.session.commit()
         first_workspace_member = WorkspaceMember.query.filter_by(user_id=user.id).first()
         if first_workspace_member: session['active_workspace_id'] = first_workspace_member.workspace_id
         return redirect(url_for('index'))
@@ -363,6 +367,8 @@ def authorize_google():
             db.session.add(member)
             db.session.commit()
         login_user(user)
+        user.last_login = datetime.utcnow()
+        db.session.commit()
         first_workspace_member = WorkspaceMember.query.filter_by(user_id=user.id).first()
         if first_workspace_member: session['active_workspace_id'] = first_workspace_member.workspace_id
         return redirect(url_for('index'))
@@ -1075,11 +1081,12 @@ def export_business_excel():
 
 
 # ============================================
-# 🔐 슈퍼 어드민 페이지
-# ============================================
-# 이 코드를 app.py 맨 끝의 "with app.app_context():" 바로 위에 붙여넣으세요!
 
-SUPER_ADMIN_EMAILS = ['ghtes33@gmail.com']  # ← 작형님 이메일로 변경!
+# ============================================
+# 🔐 슈퍼 어드민 페이지 (통계 포함 버전)
+# ============================================
+
+SUPER_ADMIN_EMAILS = ['ghtes33@gmail.com']
 
 def super_admin_required(f):
     @wraps(f)
@@ -1099,6 +1106,11 @@ def admin_dashboard():
     total_users = User.query.count()
     total_workspaces = Workspace.query.count()
     
+    # 전체 통계
+    total_expense = db.session.query(db.func.sum(Transaction.amount)).scalar() or 0
+    total_sales = db.session.query(db.func.sum(Sale.total_selling_amount)).scalar() or 0
+    total_profit = db.session.query(db.func.sum(Sale.net_profit)).scalar() or 0
+    
     search = request.args.get('search', '')
     page = request.args.get('page', 1, type=int)
     per_page = 20
@@ -1116,17 +1128,38 @@ def admin_dashboard():
     
     user_data = []
     for user in users:
-        workspace_count = WorkspaceMember.query.filter_by(user_id=user.id).count()
+        # 유저가 owner인 workspace들 찾기
+        owner_workspaces = WorkspaceMember.query.filter_by(user_id=user.id, role='owner').all()
+        workspace_ids = [w.workspace_id for w in owner_workspaces]
+        
+        # 해당 workspace들의 지출/매출/순이익 합계
+        user_expense = 0
+        user_sales = 0
+        user_profit = 0
+        
+        if workspace_ids:
+            user_expense = db.session.query(db.func.sum(Transaction.amount)).filter(Transaction.workspace_id.in_(workspace_ids)).scalar() or 0
+            user_sales = db.session.query(db.func.sum(Sale.total_selling_amount)).filter(Sale.workspace_id.in_(workspace_ids)).scalar() or 0
+            user_profit = db.session.query(db.func.sum(Sale.net_profit)).filter(Sale.workspace_id.in_(workspace_ids)).scalar() or 0
+        
         user_data.append({
             'id': user.id,
             'username': user.username,
             'email': user.email,
-            'workspace_count': workspace_count
+            'workspace_count': len(owner_workspaces),
+            'created_at': user.created_at if hasattr(user, 'created_at') and user.created_at else None,
+            'last_login': user.last_login if hasattr(user, 'last_login') and user.last_login else None,
+            'expense': user_expense,
+            'sales': user_sales,
+            'profit': user_profit
         })
     
     return render_template('admin.html',
         total_users=total_users,
         total_workspaces=total_workspaces,
+        total_expense=total_expense,
+        total_sales=total_sales,
+        total_profit=total_profit,
         users=user_data,
         pagination=pagination,
         search=search
@@ -1140,18 +1173,39 @@ def admin_user_detail(user_id):
     
     memberships = WorkspaceMember.query.filter_by(user_id=user.id).all()
     workspaces = []
+    
+    total_expense = 0
+    total_sales = 0
+    total_profit = 0
+    
     for m in memberships:
         workspace = Workspace.query.get(m.workspace_id)
         if workspace:
+            # 각 workspace별 통계
+            ws_expense = db.session.query(db.func.sum(Transaction.amount)).filter_by(workspace_id=workspace.id).scalar() or 0
+            ws_sales = db.session.query(db.func.sum(Sale.total_selling_amount)).filter_by(workspace_id=workspace.id).scalar() or 0
+            ws_profit = db.session.query(db.func.sum(Sale.net_profit)).filter_by(workspace_id=workspace.id).scalar() or 0
+            
+            if m.role == 'owner':
+                total_expense += ws_expense
+                total_sales += ws_sales
+                total_profit += ws_profit
+            
             workspaces.append({
                 'id': workspace.id,
                 'name': workspace.name,
-                'role': m.role
+                'role': m.role,
+                'expense': ws_expense,
+                'sales': ws_sales,
+                'profit': ws_profit
             })
     
     return render_template('admin_user_detail.html',
         user=user,
-        workspaces=workspaces
+        workspaces=workspaces,
+        total_expense=total_expense,
+        total_sales=total_sales,
+        total_profit=total_profit
     )
 
 @app.route('/admin/delete_user/<int:user_id>', methods=['POST'])
@@ -1177,7 +1231,6 @@ def admin_delete_user(user_id):
 
 # ============================================
 
-
 with app.app_context():
     try:
         db.create_all()
@@ -1187,4 +1240,3 @@ with app.app_context():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=True)
-
