@@ -47,25 +47,42 @@
     </table>
 </div>
 
-<!-- 전체 통계 (소유한 사업장 기준) -->
-<div style="display: flex; gap: 15px; margin: 20px 0; flex-wrap: wrap;">
-    <div class="card" style="flex: 1; min-width: 150px; text-align: center;">
-        <h4 style="margin: 0; color: #888; font-size: 0.9em;">총 지출</h4>
-        <p style="font-size: 1.5em; margin: 10px 0; color: #ff6b6b;">{{ "{:,}".format(total_expense) }}원</p>
+<!-- 월 선택 필터 -->
+<div class="card mt-4">
+    <h3>📊 기간별 통계</h3>
+    <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px;">
+        <a href="{{ url_for('admin_user_detail', user_id=user.id) }}" 
+           class="btn {% if not selected_month %}btn-primary{% else %}btn-secondary{% endif %}">
+            전체
+        </a>
+        {% for month in available_months %}
+        <a href="{{ url_for('admin_user_detail', user_id=user.id, month=month) }}" 
+           class="btn {% if selected_month == month %}btn-primary{% else %}btn-secondary{% endif %}">
+            {{ month }}
+        </a>
+        {% endfor %}
     </div>
-    <div class="card" style="flex: 1; min-width: 150px; text-align: center;">
-        <h4 style="margin: 0; color: #888; font-size: 0.9em;">총 매출</h4>
-        <p style="font-size: 1.5em; margin: 10px 0; color: #ffd93d;">{{ "{:,}".format(total_sales) }}원</p>
-    </div>
-    <div class="card" style="flex: 1; min-width: 150px; text-align: center;">
-        <h4 style="margin: 0; color: #888; font-size: 0.9em;">총 순이익</h4>
-        <p style="font-size: 1.5em; margin: 10px 0; color: {% if total_profit >= 0 %}#6BCB77{% else %}#ff6b6b{% endif %};">{{ "{:,}".format(total_profit) }}원</p>
+    
+    <!-- 통계 카드 -->
+    <div style="display: flex; gap: 15px; flex-wrap: wrap;">
+        <div style="flex: 1; min-width: 150px; text-align: center; background: #1a1a2e; padding: 20px; border-radius: 10px;">
+            <h4 style="margin: 0; color: #888; font-size: 0.9em;">총 지출</h4>
+            <p style="font-size: 1.5em; margin: 10px 0; color: #ff6b6b;">{{ "{:,}".format(total_expense) }}원</p>
+        </div>
+        <div style="flex: 1; min-width: 150px; text-align: center; background: #1a1a2e; padding: 20px; border-radius: 10px;">
+            <h4 style="margin: 0; color: #888; font-size: 0.9em;">총 매출</h4>
+            <p style="font-size: 1.5em; margin: 10px 0; color: #ffd93d;">{{ "{:,}".format(total_sales) }}원</p>
+        </div>
+        <div style="flex: 1; min-width: 150px; text-align: center; background: #1a1a2e; padding: 20px; border-radius: 10px;">
+            <h4 style="margin: 0; color: #888; font-size: 0.9em;">총 순이익</h4>
+            <p style="font-size: 1.5em; margin: 10px 0; color: {% if total_profit >= 0 %}#6BCB77{% else %}#ff6b6b{% endif %};">{{ "{:,}".format(total_profit) }}원</p>
+        </div>
     </div>
 </div>
 
 <!-- 소속 사업장 -->
 <div class="card mt-4">
-    <h3>소속 사업장 ({{ workspaces|length }}개)</h3>
+    <h3>소속 사업장 ({{ workspaces|length }}개) {% if selected_month %}<span style="color: #888; font-size: 0.8em;">- {{ selected_month }} 기준</span>{% endif %}</h3>
     
     {% if workspaces %}
     <div style="overflow-x: auto;">

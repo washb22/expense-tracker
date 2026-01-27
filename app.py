@@ -1172,10 +1172,20 @@ def admin_dashboard():
 @super_admin_required
 def admin_user_detail(user_id):
     user = User.query.get_or_404(user_id)
+    month_filter = request.args.get('month')
     
     memberships = WorkspaceMember.query.filter_by(user_id=user.id).all()
-    workspaces = []
+    workspace_ids = [m.workspace_id for m in memberships if m.role == 'owner']
     
+    # 가능한 월 목록 가져오기 (Sale 테이블 기준)
+    available_months = []
+    if workspace_ids:
+        sale_dates = db.session.query(Sale.date).filter(Sale.workspace_id.in_(workspace_ids)).all()
+        trans_dates = db.session.query(Transaction.date).filter(Transaction.workspace_id.in_(workspace_ids)).all()
+        all_dates = [d[0] for d in sale_dates + trans_dates if d[0]]
+        available_months = sorted(list(set([d.strftime('%Y-%m') for d in all_dates])), reverse=True)
+    
+    workspaces = []
     total_expense = 0
     total_sales = 0
     total_profit = 0
@@ -1183,11 +1193,27 @@ def admin_user_detail(user_id):
     for m in memberships:
         workspace = Workspace.query.get(m.workspace_id)
         if workspace:
-            # 각 workspace별 통계
-            ws_expense = db.session.query(db.func.sum(Transaction.amount)).filter_by(workspace_id=workspace.id).scalar() or 0
-            ws_sales = db.session.query(db.func.sum(Sale.total_selling_amount)).filter_by(workspace_id=workspace.id).scalar() or 0
-            ws_sale_profit = db.session.query(db.func.sum(Sale.net_profit)).filter_by(workspace_id=workspace.id).scalar() or 0
-            ws_profit = ws_sale_profit - ws_expense  # 순이익 = 판매이익 - 지출
+            # 기본 쿼리
+            expense_query = db.session.query(db.func.sum(Transaction.amount)).filter_by(workspace_id=workspace.id)
+            sales_query = db.session.query(db.func.sum(Sale.total_selling_amount)).filter_by(workspace_id=workspace.id)
+            profit_query = db.session.query(db.func.sum(Sale.net_profit)).filter_by(workspace_id=workspace.id)
+            
+            # 월 필터 적용
+            if month_filter:
+                start_date = datetime.strptime(month_filter + '-01', '%Y-%m-%d')
+                if start_date.month == 12:
+                    end_date = start_date.replace(year=start_date.year + 1, month=1)
+                else:
+                    end_date = start_date.replace(month=start_date.month + 1)
+                
+                expense_query = expense_query.filter(Transaction.date >= start_date, Transaction.date < end_date)
+                sales_query = sales_query.filter(Sale.date >= start_date, Sale.date < end_date)
+                profit_query = profit_query.filter(Sale.date >= start_date, Sale.date < end_date)
+            
+            ws_expense = expense_query.scalar() or 0
+            ws_sales = sales_query.scalar() or 0
+            ws_sale_profit = profit_query.scalar() or 0
+            ws_profit = ws_sale_profit - ws_expense
             
             if m.role == 'owner':
                 total_expense += ws_expense
@@ -1208,7 +1234,9 @@ def admin_user_detail(user_id):
         workspaces=workspaces,
         total_expense=total_expense,
         total_sales=total_sales,
-        total_profit=total_profit
+        total_profit=total_profit,
+        available_months=available_months,
+        selected_month=month_filter
     )
 
 @app.route('/admin/delete_user/<int:user_id>', methods=['POST'])
