@@ -1073,6 +1073,111 @@ def export_business_excel():
     output.seek(0)
     return send_file(output, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', as_attachment=True, download_name=f'{filename}.xlsx')
 
+
+# ============================================
+# 🔐 슈퍼 어드민 페이지
+# ============================================
+# 이 코드를 app.py 맨 끝의 "with app.app_context():" 바로 위에 붙여넣으세요!
+
+SUPER_ADMIN_EMAILS = ['ghtes33@gmail.com']  # ← 작형님 이메일로 변경!
+
+def super_admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not current_user.is_authenticated:
+            return redirect(url_for('login'))
+        if current_user.email not in SUPER_ADMIN_EMAILS:
+            flash('슈퍼 관리자 권한이 필요합니다.', 'error')
+            return redirect(url_for('index'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+@app.route('/admin')
+@login_required
+@super_admin_required
+def admin_dashboard():
+    total_users = User.query.count()
+    total_workspaces = Workspace.query.count()
+    
+    search = request.args.get('search', '')
+    page = request.args.get('page', 1, type=int)
+    per_page = 20
+    
+    query = User.query
+    if search:
+        query = query.filter(
+            (User.username.ilike(f'%{search}%')) | 
+            (User.email.ilike(f'%{search}%'))
+        )
+    
+    query = query.order_by(User.id.desc())
+    pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+    users = pagination.items
+    
+    user_data = []
+    for user in users:
+        workspace_count = WorkspaceMember.query.filter_by(user_id=user.id).count()
+        user_data.append({
+            'id': user.id,
+            'username': user.username,
+            'email': user.email,
+            'workspace_count': workspace_count
+        })
+    
+    return render_template('admin.html',
+        total_users=total_users,
+        total_workspaces=total_workspaces,
+        users=user_data,
+        pagination=pagination,
+        search=search
+    )
+
+@app.route('/admin/user/<int:user_id>')
+@login_required
+@super_admin_required
+def admin_user_detail(user_id):
+    user = User.query.get_or_404(user_id)
+    
+    memberships = WorkspaceMember.query.filter_by(user_id=user.id).all()
+    workspaces = []
+    for m in memberships:
+        workspace = Workspace.query.get(m.workspace_id)
+        if workspace:
+            workspaces.append({
+                'id': workspace.id,
+                'name': workspace.name,
+                'role': m.role
+            })
+    
+    return render_template('admin_user_detail.html',
+        user=user,
+        workspaces=workspaces
+    )
+
+@app.route('/admin/delete_user/<int:user_id>', methods=['POST'])
+@login_required
+@super_admin_required
+def admin_delete_user(user_id):
+    if user_id == current_user.id:
+        flash('자기 자신은 삭제할 수 없습니다.', 'error')
+        return redirect(url_for('admin_dashboard'))
+    
+    user = User.query.get_or_404(user_id)
+    username = user.username
+    
+    try:
+        db.session.delete(user)
+        db.session.commit()
+        flash(f"'{username}' 회원이 삭제되었습니다.", 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'회원 삭제 중 오류 발생: {str(e)}', 'error')
+    
+    return redirect(url_for('admin_dashboard'))
+
+# ============================================
+
+
 with app.app_context():
     try:
         db.create_all()

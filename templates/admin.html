@@ -1,0 +1,68 @@
+{% extends "layout.html" %}
+{% block title %}관리자 대시보드 - MoneyLog{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h2>🔐 관리자 대시보드</h2>
+</div>
+
+<div class="stats-grid" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; margin-bottom: 30px;">
+    <div class="stat-card" style="background: var(--card-bg); padding: 20px; border-radius: 10px;">
+        <h3 style="color: var(--text-muted); font-size: 14px;">총 회원 수</h3>
+        <p style="font-size: 32px; font-weight: bold; color: var(--primary-color);">{{ total_users }}</p>
+    </div>
+    <div class="stat-card" style="background: var(--card-bg); padding: 20px; border-radius: 10px;">
+        <h3 style="color: var(--text-muted); font-size: 14px;">총 사업장 수</h3>
+        <p style="font-size: 32px; font-weight: bold; color: var(--accent-color);">{{ total_workspaces }}</p>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+        <h3>회원 목록</h3>
+        <form method="GET" style="display: flex; gap: 10px;">
+            <input type="text" name="search" placeholder="이름 또는 이메일 검색" value="{{ search }}" 
+                   style="padding: 8px 12px; border-radius: 5px; border: 1px solid var(--border-color); background: var(--bg-color); color: var(--text-color);">
+            <button type="submit" class="btn btn-primary">검색</button>
+        </form>
+    </div>
+    
+    <table class="data-table" style="width: 100%; border-collapse: collapse;">
+        <thead>
+            <tr style="border-bottom: 1px solid var(--border-color);">
+                <th style="padding: 12px; text-align: left;">ID</th>
+                <th style="padding: 12px; text-align: left;">사용자명</th>
+                <th style="padding: 12px; text-align: left;">이메일</th>
+                <th style="padding: 12px; text-align: center;">사업장 수</th>
+                <th style="padding: 12px; text-align: center;">관리</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for user in users %}
+            <tr style="border-bottom: 1px solid var(--border-color);">
+                <td style="padding: 12px;">{{ user.id }}</td>
+                <td style="padding: 12px;">{{ user.username }}</td>
+                <td style="padding: 12px;">{{ user.email }}</td>
+                <td style="padding: 12px; text-align: center;">{{ user.workspace_count }}</td>
+                <td style="padding: 12px; text-align: center;">
+                    <a href="{{ url_for('admin_user_detail', user_id=user.id) }}" class="btn btn-sm" style="padding: 5px 10px; font-size: 12px;">상세</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    
+    {% if pagination.pages > 1 %}
+    <div class="pagination" style="margin-top: 20px; display: flex; justify-content: center; gap: 10px;">
+        {% if pagination.has_prev %}
+        <a href="{{ url_for('admin_dashboard', page=pagination.prev_num, search=search) }}" class="btn btn-secondary">이전</a>
+        {% endif %}
+        
+        <span style="padding: 8px 12px;">{{ pagination.page }} / {{ pagination.pages }}</span>
+        
+        {% if pagination.has_next %}
+        <a href="{{ url_for('admin_dashboard', page=pagination.next_num, search=search) }}" class="btn btn-secondary">다음</a>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

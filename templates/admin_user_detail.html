@@ -1,0 +1,70 @@
+{% extends "layout.html" %}
+{% block title %}회원 상세 - MoneyLog{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h2>👤 회원 상세 정보</h2>
+    <a href="{{ url_for('admin_dashboard') }}" class="btn btn-secondary">← 목록으로</a>
+</div>
+
+<div class="card" style="margin-bottom: 20px;">
+    <div class="card-header">
+        <h3>기본 정보</h3>
+    </div>
+    <div class="card-body" style="padding: 20px;">
+        <p><strong>ID:</strong> {{ user.id }}</p>
+        <p><strong>사용자명:</strong> {{ user.username }}</p>
+        <p><strong>이메일:</strong> {{ user.email }}</p>
+    </div>
+</div>
+
+<div class="card" style="margin-bottom: 20px;">
+    <div class="card-header">
+        <h3>소속 사업장 ({{ workspaces|length }}개)</h3>
+    </div>
+    <div class="card-body" style="padding: 20px;">
+        {% if workspaces %}
+        <table class="data-table" style="width: 100%; border-collapse: collapse;">
+            <thead>
+                <tr style="border-bottom: 1px solid var(--border-color);">
+                    <th style="padding: 10px; text-align: left;">사업장 ID</th>
+                    <th style="padding: 10px; text-align: left;">사업장명</th>
+                    <th style="padding: 10px; text-align: left;">역할</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for ws in workspaces %}
+                <tr style="border-bottom: 1px solid var(--border-color);">
+                    <td style="padding: 10px;">{{ ws.id }}</td>
+                    <td style="padding: 10px;">{{ ws.name }}</td>
+                    <td style="padding: 10px;">
+                        {% if ws.role == 'owner' %}
+                        <span style="color: #f39c12;">👑 소유자</span>
+                        {% elif ws.role == 'admin' %}
+                        <span style="color: #3498db;">⚙️ 관리자</span>
+                        {% else %}
+                        <span>👤 멤버</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p style="color: var(--text-muted);">소속된 사업장이 없습니다.</p>
+        {% endif %}
+    </div>
+</div>
+
+<div class="card" style="background: #2c1810; border: 1px solid #e74c3c;">
+    <div class="card-header" style="border-bottom: 1px solid #e74c3c;">
+        <h3 style="color: #e74c3c;">⚠️ 위험 구역</h3>
+    </div>
+    <div class="card-body" style="padding: 20px;">
+        <p style="margin-bottom: 15px; color: var(--text-muted);">회원을 삭제하면 해당 회원의 모든 데이터가 삭제됩니다. 이 작업은 되돌릴 수 없습니다.</p>
+        <form method="POST" action="{{ url_for('admin_delete_user', user_id=user.id) }}" 
+              onsubmit="return confirm('정말로 이 회원을 삭제하시겠습니까? 모든 데이터가 삭제됩니다!');">
+            <button type="submit" class="btn" style="background: #e74c3c; color: white;">🗑️ 회원 삭제</button>
+        </form>
+    </div>
+</div>
+{% endblock %}
