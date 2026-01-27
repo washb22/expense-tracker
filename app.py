@@ -1109,7 +1109,8 @@ def admin_dashboard():
     # 전체 통계
     total_expense = db.session.query(db.func.sum(Transaction.amount)).scalar() or 0
     total_sales = db.session.query(db.func.sum(Sale.total_selling_amount)).scalar() or 0
-    total_profit = db.session.query(db.func.sum(Sale.net_profit)).scalar() or 0
+    total_sale_profit = db.session.query(db.func.sum(Sale.net_profit)).scalar() or 0
+    total_profit = total_sale_profit - total_expense  # 순이익 = 판매이익 - 지출
     
     search = request.args.get('search', '')
     page = request.args.get('page', 1, type=int)
@@ -1140,7 +1141,8 @@ def admin_dashboard():
         if workspace_ids:
             user_expense = db.session.query(db.func.sum(Transaction.amount)).filter(Transaction.workspace_id.in_(workspace_ids)).scalar() or 0
             user_sales = db.session.query(db.func.sum(Sale.total_selling_amount)).filter(Sale.workspace_id.in_(workspace_ids)).scalar() or 0
-            user_profit = db.session.query(db.func.sum(Sale.net_profit)).filter(Sale.workspace_id.in_(workspace_ids)).scalar() or 0
+            user_sale_profit = db.session.query(db.func.sum(Sale.net_profit)).filter(Sale.workspace_id.in_(workspace_ids)).scalar() or 0
+            user_profit = user_sale_profit - user_expense  # 순이익 = 판매이익 - 지출
         
         user_data.append({
             'id': user.id,
@@ -1184,7 +1186,8 @@ def admin_user_detail(user_id):
             # 각 workspace별 통계
             ws_expense = db.session.query(db.func.sum(Transaction.amount)).filter_by(workspace_id=workspace.id).scalar() or 0
             ws_sales = db.session.query(db.func.sum(Sale.total_selling_amount)).filter_by(workspace_id=workspace.id).scalar() or 0
-            ws_profit = db.session.query(db.func.sum(Sale.net_profit)).filter_by(workspace_id=workspace.id).scalar() or 0
+            ws_sale_profit = db.session.query(db.func.sum(Sale.net_profit)).filter_by(workspace_id=workspace.id).scalar() or 0
+            ws_profit = ws_sale_profit - ws_expense  # 순이익 = 판매이익 - 지출
             
             if m.role == 'owner':
                 total_expense += ws_expense
