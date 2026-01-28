@@ -6,7 +6,10 @@ import json
 import re
 import uuid
 from flask_sqlalchemy import SQLAlchemy
-from datetime import datetime
+from datetime import datetime, timedelta
+
+def get_kst_now():
+    return datetime.utcnow() + timedelta(hours=9)
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 import io
 from authlib.integrations.flask_client import OAuth
@@ -114,7 +117,7 @@ class User(UserMixin, db.Model):
     username = db.Column(db.String(80), unique=True, nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
     password_hash = db.Column(db.String(256), nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=get_kst_now)
     last_login = db.Column(db.DateTime)
     workspaces = db.relationship('WorkspaceMember', back_populates='user', cascade="all, delete-orphan")
     def set_password(self, password): self.password_hash = generate_password_hash(password)
@@ -311,7 +314,7 @@ def login():
             flash('사용자 이름 또는 비밀번호가 올바르지 않습니다.', 'error')
             return redirect(url_for('login'))
         login_user(user)
-        user.last_login = datetime.utcnow()
+        user.last_login = get_kst_now()
         db.session.commit()
         first_workspace_member = WorkspaceMember.query.filter_by(user_id=user.id).first()
         if first_workspace_member: session['active_workspace_id'] = first_workspace_member.workspace_id
@@ -367,7 +370,7 @@ def authorize_google():
             db.session.add(member)
             db.session.commit()
         login_user(user)
-        user.last_login = datetime.utcnow()
+        user.last_login = get_kst_now()
         db.session.commit()
         first_workspace_member = WorkspaceMember.query.filter_by(user_id=user.id).first()
         if first_workspace_member: session['active_workspace_id'] = first_workspace_member.workspace_id
