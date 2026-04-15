@@ -1329,38 +1329,58 @@ def migrate_ad_spend_columns():
                     print(f"[Migration] {col} 추가 실패: {e}")
 
 
-def fetch_meta_ads_for_workspace(workspace_id, access_token, ad_account_id, target_date=None):
+def fetch_meta_ads_for_workspace(workspace_id, access_token, ad_account_id, target_date=None, start_date=None, end_date=None):
+    """target_date 단일 모드 또는 (start_date, end_date) 기간 모드"""
     if not access_token or not ad_account_id:
         return {'status': 'skip', 'message': '토큰 없음'}
 
-    if target_date is None:
-        target_date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+    range_mode = bool(start_date and end_date)
+    if range_mode:
+        since, until = start_date, end_date
+    else:
+        if target_date is None:
+            target_date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+        since = until = target_date
 
     url = f"https://graph.facebook.com/v19.0/{ad_account_id}/insights"
     params = {
         'access_token': access_token,
-        'time_range': json.dumps({"since": target_date, "until": target_date}),
+        'time_range': json.dumps({"since": since, "until": until}),
         'fields': ','.join([
             'campaign_id', 'campaign_name',
             'adset_id', 'adset_name',
             'ad_id', 'ad_name',
             'spend', 'impressions', 'clicks', 'ctr', 'cpc', 'cpm',
-            'actions', 'action_values', 'purchase_roas'
+            'actions', 'action_values', 'purchase_roas',
+            'date_start'
         ]),
         'level': 'ad',
         'limit': 500,
     }
+    if range_mode:
+        params['time_increment'] = 1  # 일별로 쪼개기
 
+    all_rows = []
     try:
-        resp = requests.get(url, params=params, timeout=30)
-        data = resp.json()
+        next_url = url
+        next_params = params
+        # 페이지네이션 처리
+        while next_url:
+            resp = requests.get(next_url, params=next_params, timeout=60)
+            data = resp.json()
+            if 'error' in data:
+                return {'status': 'error', 'message': data['error'].get('message', '알 수 없는 오류')}
+            all_rows.extend(data.get('data', []))
+            paging = data.get('paging', {}).get('next')
+            if paging:
+                next_url = paging
+                next_params = None  # next URL에 이미 모든 파라미터 포함
+            else:
+                next_url = None
 
-        if 'error' in data:
-            return {'status': 'error', 'message': data['error'].get('message', '알 수 없는 오류')}
-
-        rows = data.get('data', [])
+        rows = all_rows
         saved = 0
-        date_obj = datetime.strptime(target_date, '%Y-%m-%d').date()
+        single_date_obj = None if range_mode else datetime.strptime(target_date, '%Y-%m-%d').date()
 
         for row in rows:
             spend = float(row.get('spend', 0))
@@ -1386,6 +1406,11 @@ def fetch_meta_ads_for_workspace(workspace_id, access_token, ad_account_id, targ
             )
 
             ad_id = row.get('ad_id', '')
+            row_date_str = row.get('date_start')
+            if row_date_str:
+                date_obj = datetime.strptime(row_date_str, '%Y-%m-%d').date()
+            else:
+                date_obj = single_date_obj or datetime.now().date()
             existing = AdSpend.query.filter_by(
                 workspace_id=workspace_id,
                 date=date_obj,
@@ -1424,7 +1449,8 @@ def fetch_meta_ads_for_workspace(workspace_id, access_token, ad_account_id, targ
             saved += 1
 
         db.session.commit()
-        return {'status': 'ok', 'saved': saved, 'date': target_date}
+        date_label = f"{since} ~ {until}" if range_mode else target_date
+        return {'status': 'ok', 'saved': saved, 'date': date_label}
 
     except Exception as e:
         db.session.rollback()
@@ -1486,15 +1512,20 @@ def ads_fetch_manual(membership):
         return redirect(url_for('ads_settings'))
 
     target_date = request.form.get('target_date')
+    start_date = request.form.get('start_date')
+    end_date = request.form.get('end_date')
+
     result = fetch_meta_ads_for_workspace(
         workspace_id,
         settings.meta_access_token,
         settings.meta_ad_account_id,
-        target_date=target_date
+        target_date=target_date,
+        start_date=start_date,
+        end_date=end_date,
     )
 
     if result['status'] == 'ok':
-        flash(f"{result['date']} 데이터 수집 완료 ({result['saved']}개 캠페인)", 'success')
+        flash(f"{result['date']} 데이터 수집 완료 ({result['saved']}건)", 'success')
     else:
         flash(f"수집 오류: {result.get('message', '')}", 'error')
 
