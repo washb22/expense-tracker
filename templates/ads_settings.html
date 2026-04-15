@@ -1,0 +1,53 @@
+{% extends "layout.html" %}
+{% block title %}광고 API 설정{% endblock %}
+{% block content %}
+<div class="header">
+    <h1>메타 광고 API 연동</h1>
+    <p>이 사업장 전용 메타 광고 액세스 토큰을 등록합니다. 다른 사업장과 공유되지 않습니다.</p>
+</div>
+
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% for category, message in messages %}
+    <div class="alert alert-{{ category }}" style="padding:12px;margin-bottom:16px;border-radius:8px;background:{% if category=='success' %}#d4edda{% else %}#f8d7da{% endif %}">{{ message }}</div>
+  {% endfor %}
+{% endwith %}
+
+<div class="card">
+    <h3>API 설정</h3>
+    <form method="POST">
+        <div class="form-group">
+            <label>메타 액세스 토큰</label>
+            <input type="password" name="meta_access_token" class="form-control"
+                   value="{{ settings.meta_access_token if settings and settings.meta_access_token else '' }}"
+                   placeholder="EAAxxxxxxx...">
+            <small style="color:#888">Meta Business Suite → 설정 → 시스템 사용자 → 토큰 생성 (ads_read 권한 필요)</small>
+        </div>
+        <div class="form-group">
+            <label>광고 계정 ID</label>
+            <input type="text" name="meta_ad_account_id" class="form-control"
+                   value="{{ settings.meta_ad_account_id if settings and settings.meta_ad_account_id else '' }}"
+                   placeholder="act_123456789">
+            <small style="color:#888">메타 광고 관리자 URL에서 확인 가능 (act_ 포함해서 입력)</small>
+        </div>
+        <button type="submit" class="btn btn-primary">저장</button>
+    </form>
+</div>
+
+<div class="card" style="margin-top:20px">
+    <h3>수동 데이터 수집</h3>
+    <p style="color:#888;margin-bottom:16px">특정 날짜의 광고 데이터를 지금 바로 가져옵니다.</p>
+    <form method="POST" action="{{ url_for('ads_fetch_manual') }}">
+        <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+            <input type="date" name="target_date" class="form-control" style="width:180px"
+                   value="{{ (now - timedelta(days=1)).strftime('%Y-%m-%d') if now else '' }}">
+            <button type="submit" class="btn btn-success">데이터 가져오기</button>
+        </div>
+    </form>
+</div>
+
+<div class="card" style="margin-top:20px">
+    <h3>자동 수집 스케줄</h3>
+    <p style="color:#888">매일 새벽 2시(한국 시간)에 전날 광고 데이터가 자동으로 수집됩니다.</p>
+    <a href="{{ url_for('ads_dashboard') }}" class="btn btn-secondary" style="margin-top:12px">광고 대시보드 보기</a>
+</div>
+{% endblock %}

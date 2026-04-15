@@ -1,0 +1,216 @@
+{% extends "layout.html" %}
+{% block title %}광고 효율 분석{% endblock %}
+{% block content %}
+<div class="header" style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px">
+    <div>
+        <h1>광고 효율 분석</h1>
+        <p>{{ start_date }} ~ {{ end_date }}</p>
+    </div>
+    <a href="{{ url_for('ads_settings') }}" class="btn btn-secondary">API 설정</a>
+</div>
+
+{% if not has_token %}
+<div class="card" style="background:linear-gradient(135deg,#ffc107,#e0a800);color:#333;padding:20px">
+    <h4>메타 API 토큰이 없습니다</h4>
+    <p>광고 데이터를 자동으로 가져오려면 메타 액세스 토큰을 등록해주세요.</p>
+    <a href="{{ url_for('ads_settings') }}" class="btn btn-primary" style="margin-top:12px">토큰 등록하기</a>
+</div>
+{% endif %}
+
+<!-- 기간 필터 -->
+<div class="month-filters" style="margin-bottom:20px">
+    <a href="{{ url_for('ads_dashboard', period='7') }}"
+       class="btn {{ 'btn-active' if period=='7' and not selected_month else 'btn-secondary' }}">최근 7일</a>
+    <a href="{{ url_for('ads_dashboard', period='30') }}"
+       class="btn {{ 'btn-active' if period=='30' and not selected_month else 'btn-secondary' }}">최근 30일</a>
+    {% for month in available_months %}
+    <a href="{{ url_for('ads_dashboard', month=month) }}"
+       class="btn {{ 'btn-active' if selected_month == month else 'btn-secondary' }}">{{ month }}</a>
+    {% endfor %}
+</div>
+
+<!-- 경고 배너 -->
+{% if alerts %}
+<div style="background:rgba(220,53,69,0.15);border:1px solid rgba(220,53,69,0.3);border-radius:8px;padding:14px;margin-bottom:20px">
+    <strong style="color:#dc3545">주의가 필요한 캠페인</strong>
+    {% for c in alerts %}
+    <div style="margin-top:6px;color:#dc3545;font-size:14px">
+        · {{ c.name }} — {{ '{:,.0f}'.format(c.spend) }}원 집행, 전환 0건 ({{ c.spend|round(0)|int }}원 낭비 중)
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+<!-- 요약 카드 -->
+<div class="summary-cards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:24px">
+    <div class="card" style="background:linear-gradient(135deg,#e74c3c,#c0392b);color:white">
+        <h3>총 광고비</h3>
+        <p>{{ '{:,.0f}'.format(total_spend) }}원</p>
+    </div>
+    <div class="card" style="background:linear-gradient(135deg,#27ae60,#1e8449);color:white">
+        <h3>전환 매출</h3>
+        <p>{{ '{:,.0f}'.format(total_conversion_value) }}원</p>
+    </div>
+    <div class="card" style="background:{% if overall_roas >= BREAKEVEN_ROAS %}linear-gradient(135deg,#6f42c1,#5a32a3){% else %}linear-gradient(135deg,#dc3545,#b02a37){% endif %};color:white">
+        <h3>ROAS</h3>
+        <p>{{ overall_roas }}</p>
+        <small>손익분기 {{ BREAKEVEN_ROAS }}</small>
+    </div>
+    <div class="card" style="background:linear-gradient(135deg,#2980b9,#1a6fa0);color:white">
+        <h3>평균 CTR</h3>
+        <p>{{ avg_ctr }}%</p>
+    </div>
+    <div class="card" style="background:linear-gradient(135deg,#16a085,#0e6655);color:white">
+        <h3>CPC</h3>
+        <p>{{ '{:,.0f}'.format(avg_cpc) }}원</p>
+    </div>
+    <div class="card" style="background:linear-gradient(135deg,#8e44ad,#6c3483);color:white">
+        <h3>전환수 / CPA</h3>
+        <p>{{ total_conversions }}건</p>
+        <small>{{ '{:,.0f}'.format(cpa) }}원/건</small>
+    </div>
+</div>
+
+<!-- 차트 2개 -->
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px">
+    <div class="card">
+        <h3 style="font-size:14px;margin-bottom:12px">일별 광고비 vs 전환매출</h3>
+        <div style="display:flex;gap:12px;font-size:12px;color:#888;margin-bottom:8px">
+            <span><span style="display:inline-block;width:10px;height:10px;background:#e74c3c;border-radius:2px;margin-right:3px"></span>광고비</span>
+            <span><span style="display:inline-block;width:10px;height:10px;background:#27ae60;border-radius:2px;margin-right:3px"></span>전환매출</span>
+        </div>
+        <div style="position:relative;height:180px">
+            <canvas id="chartSpend" role="img" aria-label="일별 광고비와 전환매출 추이">일별 광고비 vs 전환매출</canvas>
+        </div>
+    </div>
+    <div class="card">
+        <h3 style="font-size:14px;margin-bottom:12px">캠페인별 ROAS</h3>
+        <div style="position:relative;height:{{ [campaigns|length * 40 + 60, 180]|max }}px">
+            <canvas id="chartRoas" role="img" aria-label="캠페인별 ROAS 비교">캠페인 ROAS</canvas>
+        </div>
+    </div>
+</div>
+
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px">
+    <div class="card">
+        <h3 style="font-size:14px;margin-bottom:12px">CTR 추이</h3>
+        <div style="position:relative;height:150px">
+            <canvas id="chartCtr" role="img" aria-label="CTR 일별 추이">CTR 추이</canvas>
+        </div>
+    </div>
+    <div class="card">
+        <h3 style="font-size:14px;margin-bottom:12px">CPM 추이</h3>
+        <div style="position:relative;height:150px">
+            <canvas id="chartCpm" role="img" aria-label="CPM 일별 추이">CPM 추이</canvas>
+        </div>
+    </div>
+</div>
+
+<!-- 캠페인 테이블 -->
+<div class="card">
+    <h3 style="margin-bottom:16px">캠페인별 효율 분석</h3>
+    {% if campaigns %}
+    <div class="table-responsive">
+        <table class="table" style="font-size:13px">
+            <thead>
+                <tr>
+                    <th>캠페인명</th>
+                    <th>광고비</th>
+                    <th>노출</th>
+                    <th>CTR</th>
+                    <th>CPC</th>
+                    <th>전환</th>
+                    <th>ROAS</th>
+                    <th>효율</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for c in campaigns %}
+                <tr>
+                    <td>{{ c.name }}</td>
+                    <td>{{ '{:,.0f}'.format(c.spend) }}원</td>
+                    <td>{{ '{:,}'.format(c.impressions) }}</td>
+                    <td style="color:{% if c.ctr >= 3 %}#28a745{% elif c.ctr >= 1.5 %}#ffc107{% else %}#dc3545{% endif %}">
+                        {{ c.ctr }}%
+                    </td>
+                    <td>{{ '{:,.0f}'.format(c.cpc) }}원</td>
+                    <td>{{ c.conversions }}건</td>
+                    <td style="color:{% if c.roas >= BREAKEVEN_ROAS %}#28a745{% elif c.roas > 0 %}#ffc107{% else %}#dc3545{% endif %};font-weight:500">
+                        {{ c.roas }}
+                    </td>
+                    <td>
+                        <span style="display:inline-block;font-size:11px;padding:2px 8px;border-radius:10px;font-weight:500;
+                            background:{% if c.efficiency=='good' %}rgba(40,167,69,0.15){% elif c.efficiency=='ok' %}rgba(40,167,69,0.1){% elif c.efficiency=='warn' %}rgba(255,193,7,0.15){% else %}rgba(220,53,69,0.15){% endif %};
+                            color:{% if c.efficiency in ['good','ok'] %}#28a745{% elif c.efficiency=='warn' %}#856404{% else %}#dc3545{% endif %}">
+                            {{ c.efficiency_label }}
+                        </span>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p style="color:#888;text-align:center;padding:40px">
+        선택한 기간에 광고 데이터가 없습니다.<br>
+        <a href="{{ url_for('ads_settings') }}">수동으로 데이터 가져오기</a>
+    </p>
+    {% endif %}
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+const labels = {{ daily_labels|safe }};
+const spendData = {{ daily_spend|safe }};
+const revenueData = {{ daily_revenue|safe }};
+const ctrData = {{ daily_ctr|safe }};
+const cpmData = {{ daily_cpm|safe }};
+const gridColor = 'rgba(128,128,128,0.1)';
+const tickFont = { size: 11 };
+
+new Chart(document.getElementById('chartSpend'), {
+    type: 'bar',
+    data: { labels, datasets: [
+        { label:'광고비', data:spendData, backgroundColor:'rgba(231,76,60,0.7)', borderWidth:0 },
+        { label:'전환매출', data:revenueData, backgroundColor:'rgba(39,174,96,0.7)', borderWidth:0 }
+    ]},
+    options: { responsive:true, maintainAspectRatio:false,
+        plugins:{ legend:{display:false} },
+        scales:{ x:{ticks:{font:tickFont},grid:{display:false}}, y:{ticks:{font:tickFont, callback:v=>v>=10000?(v/10000).toFixed(0)+'만':v}, grid:{color:gridColor}} }
+    }
+});
+
+const campaignLabels = {{ campaigns | map(attribute='name') | list | tojson }};
+const campaignRoas = {{ campaigns | map(attribute='roas') | list | tojson }};
+const roasColors = campaignRoas.map(r => r >= {{ BREAKEVEN_ROAS }} ? 'rgba(39,174,96,0.7)' : r > 0 ? 'rgba(255,193,7,0.7)' : 'rgba(231,76,60,0.7)');
+
+new Chart(document.getElementById('chartRoas'), {
+    type: 'bar',
+    data: { labels: campaignLabels, datasets: [{ data:campaignRoas, backgroundColor:roasColors, borderWidth:0, borderRadius:4 }] },
+    options: { indexAxis:'y', responsive:true, maintainAspectRatio:false,
+        plugins:{ legend:{display:false},
+            annotation:{ annotations:{ line1:{ type:'line', xMin:{{ BREAKEVEN_ROAS }}, xMax:{{ BREAKEVEN_ROAS }}, borderColor:'rgba(220,53,69,0.5)', borderWidth:1.5, borderDash:[4,3], label:{content:'손익분기', enabled:true, font:{size:10}} } } }
+        },
+        scales:{ x:{ticks:{font:tickFont},grid:{color:gridColor},min:0}, y:{ticks:{font:{size:10}},grid:{display:false}} }
+    }
+});
+
+new Chart(document.getElementById('chartCtr'), {
+    type: 'line',
+    data: { labels, datasets: [{ data:ctrData, borderColor:'#2980b9', backgroundColor:'rgba(41,128,185,0.08)', borderWidth:1.5, pointRadius:2, fill:true, tension:.3 }] },
+    options: { responsive:true, maintainAspectRatio:false,
+        plugins:{ legend:{display:false} },
+        scales:{ x:{ticks:{font:tickFont},grid:{display:false}}, y:{ticks:{font:tickFont, callback:v=>v+'%'}, grid:{color:gridColor}} }
+    }
+});
+
+new Chart(document.getElementById('chartCpm'), {
+    type: 'line',
+    data: { labels, datasets: [{ data:cpmData, borderColor:'#8e44ad', backgroundColor:'rgba(142,68,173,0.08)', borderWidth:1.5, pointRadius:2, fill:true, tension:.3 }] },
+    options: { responsive:true, maintainAspectRatio:false,
+        plugins:{ legend:{display:false} },
+        scales:{ x:{ticks:{font:tickFont},grid:{display:false}}, y:{ticks:{font:tickFont, callback:v=>v>=1000?(v/1000).toFixed(1)+'k':v}, grid:{color:gridColor}} }
+    }
+});
+</script>
+{% endblock %}

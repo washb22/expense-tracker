@@ -78,6 +78,10 @@
                         {% if 'business_products' in user_menu_permissions %}
                         <li><a href="{{ url_for('business_products') }}" class="{{ 'active' if active_page == 'business_products' else '' }}">제품 관리</a></li>
                         {% endif %}
+
+                        {% if 'ads_dashboard' in user_menu_permissions %}
+                        <li><a href="{{ url_for('ads_dashboard') }}" class="{{ 'active' if active_page == 'ads_dashboard' else '' }}">광고 효율 분석</a></li>
+                        {% endif %}
             
                        <hr style="border-color: #444; margin: 20px 0;">
                        {# '사업장 관리'는 기본으로 보여주도록 설정 #}

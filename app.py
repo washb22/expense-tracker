@@ -15,6 +15,10 @@ import io
 from authlib.integrations.flask_client import OAuth
 from dotenv import load_dotenv
 from functools import wraps
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+import atexit
+import requests
 
 load_dotenv()
 
@@ -64,7 +68,7 @@ def role_required(role="member", menu=None):
             # --- ⭐️⭐️⭐️ 여기가 핵심 수정 부분입니다 ⭐️⭐️⭐️ ---
             def get_user_permissions():
                 if membership.role in ['owner', 'admin']:
-                    return {'dashboard', 'classify', 'rules', 'business_dashboard', 'business_sales', 'business_products', 'manage_workspaces'}
+                    return {'dashboard', 'classify', 'rules', 'business_dashboard', 'business_sales', 'business_products', 'ads_dashboard', 'manage_workspaces'}
                 else:
                     permissions = MenuPermission.query.filter_by(user_id=current_user.id, workspace_id=active_workspace_id).all()
                     return {p.menu_name for p in permissions}
@@ -75,7 +79,7 @@ def role_required(role="member", menu=None):
             def redirect_to_fallback():
                 flash("이 페이지에 접근할 권한이 없습니다.", "error")
                 # 권한이 있는 페이지 리스트를 순서대로 확인
-                fallback_pages = ['business_dashboard', 'business_sales', 'dashboard', 'classify', 'manage_workspaces']
+                fallback_pages = ['business_dashboard', 'business_sales', 'ads_dashboard', 'dashboard', 'classify', 'manage_workspaces']
                 for page in fallback_pages:
                     if page in user_permissions:
                         # 페이지 이름에 맞는 함수(url)로 리디렉션합니다.
@@ -189,6 +193,37 @@ class Sale(db.Model):
     product = db.relationship('Product', backref='sales')
     platform = db.relationship('Platform', backref='sales')
 
+class WorkspaceSettings(db.Model):
+    __tablename__ = 'workspace_settings'
+    id = db.Column(db.Integer, primary_key=True)
+    workspace_id = db.Column(db.Integer, db.ForeignKey('workspace.id'), unique=True, nullable=False)
+    meta_access_token = db.Column(db.String(512), nullable=True)
+    meta_ad_account_id = db.Column(db.String(100), nullable=True)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class AdSpend(db.Model):
+    __tablename__ = 'ad_spend'
+    id = db.Column(db.Integer, primary_key=True)
+    workspace_id = db.Column(db.Integer, db.ForeignKey('workspace.id'), nullable=False)
+    date = db.Column(db.Date, nullable=False)
+    platform = db.Column(db.String(50), default='meta')
+    campaign_id = db.Column(db.String(100))
+    campaign_name = db.Column(db.String(200))
+    spend = db.Column(db.Float, default=0)
+    impressions = db.Column(db.Integer, default=0)
+    clicks = db.Column(db.Integer, default=0)
+    ctr = db.Column(db.Float, default=0)
+    cpc = db.Column(db.Float, default=0)
+    cpm = db.Column(db.Float, default=0)
+    conversions = db.Column(db.Integer, default=0)
+    conversion_value = db.Column(db.Float, default=0)
+    roas = db.Column(db.Float, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        db.UniqueConstraint('workspace_id', 'date', 'platform', 'campaign_id', name='uq_adspend_campaign_daily'),
+    )
+
 @login_manager.user_loader
 def load_user(user_id):
     return User.query.get(int(user_id))
@@ -213,7 +248,7 @@ def inject_workspaces():
         # 활성화된 멤버십이 있을 경우에만 권한을 계산합니다.
         if active_membership:
             if active_membership.role in ['owner', 'admin']:
-                user_menu_permissions = {'dashboard', 'classify', 'rules', 'business_dashboard', 'business_sales', 'business_products', 'manage_workspaces'}
+                user_menu_permissions = {'dashboard', 'classify', 'rules', 'business_dashboard', 'business_sales', 'business_products', 'ads_dashboard', 'manage_workspaces'}
             else:
                 permissions = MenuPermission.query.filter_by(user_id=current_user.id, workspace_id=active_workspace_id).all()
                 user_menu_permissions = {p.menu_name for p in permissions}
@@ -534,7 +569,7 @@ def delete_member(workspace_id, user_id):
 @app.route('/workspace/<int:workspace_id>/permissions/<int:user_id>', methods=['GET', 'POST'])
 @login_required
 def manage_permissions(workspace_id, user_id):
-    AVAILABLE_MENUS = {'dashboard': '대시보드 (지출)', 'classify': '거래내역 분류', 'rules': '카테고리 설정', 'business_dashboard': '사업 대시보드', 'business_sales': '매출 관리', 'business_products': '제품 관리'}
+    AVAILABLE_MENUS = {'dashboard': '대시보드 (지출)', 'classify': '거래내역 분류', 'rules': '카테고리 설정', 'business_dashboard': '사업 대시보드', 'business_sales': '매출 관리', 'business_products': '제품 관리', 'ads_dashboard': '광고 효율 분석'}
     workspace = Workspace.query.get_or_404(workspace_id)
     member = User.query.get_or_404(user_id)
     current_user_membership = WorkspaceMember.query.filter_by(user_id=current_user.id, workspace_id=workspace.id).first()
@@ -1264,6 +1299,319 @@ def admin_delete_user(user_id):
     return redirect(url_for('admin_dashboard'))
 
 # ============================================
+# 메타 광고 자동수집 / 대시보드
+# ============================================
+
+def fetch_meta_ads_for_workspace(workspace_id, access_token, ad_account_id, target_date=None):
+    if not access_token or not ad_account_id:
+        return {'status': 'skip', 'message': '토큰 없음'}
+
+    if target_date is None:
+        target_date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+
+    url = f"https://graph.facebook.com/v19.0/{ad_account_id}/insights"
+    params = {
+        'access_token': access_token,
+        'time_range': json.dumps({"since": target_date, "until": target_date}),
+        'fields': ','.join([
+            'campaign_id', 'campaign_name', 'spend',
+            'impressions', 'clicks', 'ctr', 'cpc', 'cpm',
+            'actions', 'action_values', 'purchase_roas'
+        ]),
+        'level': 'campaign',
+        'limit': 200,
+    }
+
+    try:
+        resp = requests.get(url, params=params, timeout=20)
+        data = resp.json()
+
+        if 'error' in data:
+            return {'status': 'error', 'message': data['error'].get('message', '알 수 없는 오류')}
+
+        rows = data.get('data', [])
+        saved = 0
+
+        for row in rows:
+            spend = float(row.get('spend', 0))
+            impressions = int(row.get('impressions', 0))
+            clicks = int(row.get('clicks', 0))
+            ctr = float(row.get('ctr', 0))
+            cpc = float(row.get('cpc', 0))
+            cpm = float(row.get('cpm', 0))
+
+            conversions = 0
+            for action in row.get('actions', []):
+                if action.get('action_type') == 'purchase':
+                    conversions = int(float(action.get('value', 0)))
+
+            conversion_value = 0
+            for av in row.get('action_values', []):
+                if av.get('action_type') == 'purchase':
+                    conversion_value = float(av.get('value', 0))
+
+            roas_list = row.get('purchase_roas', [])
+            roas = float(roas_list[0].get('value', 0)) if roas_list else (
+                round(conversion_value / spend, 2) if spend > 0 else 0
+            )
+
+            date_obj = datetime.strptime(target_date, '%Y-%m-%d').date()
+
+            existing = AdSpend.query.filter_by(
+                workspace_id=workspace_id,
+                date=date_obj,
+                platform='meta',
+                campaign_id=row.get('campaign_id', '')
+            ).first()
+
+            if existing:
+                existing.spend = spend
+                existing.impressions = impressions
+                existing.clicks = clicks
+                existing.ctr = ctr
+                existing.cpc = cpc
+                existing.cpm = cpm
+                existing.conversions = conversions
+                existing.conversion_value = conversion_value
+                existing.roas = roas
+                existing.campaign_name = row.get('campaign_name', '')
+            else:
+                db.session.add(AdSpend(
+                    workspace_id=workspace_id,
+                    date=date_obj,
+                    platform='meta',
+                    campaign_id=row.get('campaign_id', ''),
+                    campaign_name=row.get('campaign_name', ''),
+                    spend=spend,
+                    impressions=impressions,
+                    clicks=clicks,
+                    ctr=ctr,
+                    cpc=cpc,
+                    cpm=cpm,
+                    conversions=conversions,
+                    conversion_value=conversion_value,
+                    roas=roas
+                ))
+            saved += 1
+
+        db.session.commit()
+        return {'status': 'ok', 'saved': saved, 'date': target_date}
+
+    except Exception as e:
+        db.session.rollback()
+        return {'status': 'error', 'message': str(e)}
+
+
+def run_daily_meta_fetch():
+    with app.app_context():
+        workspaces = Workspace.query.all()
+        for ws in workspaces:
+            settings = WorkspaceSettings.query.filter_by(workspace_id=ws.id).first()
+            if not settings or not settings.meta_access_token:
+                continue
+            result = fetch_meta_ads_for_workspace(
+                ws.id,
+                settings.meta_access_token,
+                settings.meta_ad_account_id
+            )
+            print(f"[Meta 자동수집] workspace={ws.id} result={result}")
+
+
+@app.route('/business/ads/settings', methods=['GET', 'POST'])
+@login_required
+@role_required(role='admin', menu='business_dashboard')
+def ads_settings(membership):
+    workspace_id = membership.workspace_id
+    settings = WorkspaceSettings.query.filter_by(workspace_id=workspace_id).first()
+
+    if request.method == 'POST':
+        token = request.form.get('meta_access_token', '').strip()
+        account_id = request.form.get('meta_ad_account_id', '').strip()
+
+        if not settings:
+            settings = WorkspaceSettings(workspace_id=workspace_id)
+            db.session.add(settings)
+
+        settings.meta_access_token = token if token else None
+        settings.meta_ad_account_id = account_id if account_id else None
+        db.session.commit()
+        flash('광고 설정이 저장되었습니다.', 'success')
+        return redirect(url_for('ads_settings'))
+
+    return render_template('ads_settings.html',
+                           active_page='ads_dashboard',
+                           settings=settings,
+                           now=datetime.now(),
+                           timedelta=timedelta)
+
+
+@app.route('/business/ads/fetch', methods=['POST'])
+@login_required
+@role_required(role='admin', menu='business_dashboard')
+def ads_fetch_manual(membership):
+    workspace_id = membership.workspace_id
+    settings = WorkspaceSettings.query.filter_by(workspace_id=workspace_id).first()
+
+    if not settings or not settings.meta_access_token:
+        flash('메타 API 토큰을 먼저 설정해주세요.', 'error')
+        return redirect(url_for('ads_settings'))
+
+    target_date = request.form.get('target_date')
+    result = fetch_meta_ads_for_workspace(
+        workspace_id,
+        settings.meta_access_token,
+        settings.meta_ad_account_id,
+        target_date=target_date
+    )
+
+    if result['status'] == 'ok':
+        flash(f"{result['date']} 데이터 수집 완료 ({result['saved']}개 캠페인)", 'success')
+    else:
+        flash(f"수집 오류: {result.get('message', '')}", 'error')
+
+    return redirect(url_for('ads_dashboard'))
+
+
+@app.route('/business/ads/dashboard')
+@login_required
+@role_required(menu='business_dashboard')
+def ads_dashboard(membership):
+    workspace_id = membership.workspace_id
+    settings = WorkspaceSettings.query.filter_by(workspace_id=workspace_id).first()
+    has_token = bool(settings and settings.meta_access_token)
+
+    period = request.args.get('period', '7')
+    selected_month = request.args.get('month')
+    start_date_str = request.args.get('start_date')
+    end_date_str = request.args.get('end_date')
+
+    today = datetime.now().date()
+
+    if start_date_str and end_date_str:
+        start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
+        end_date = datetime.strptime(end_date_str, '%Y-%m-%d').date()
+    elif selected_month:
+        start_date = datetime.strptime(selected_month + '-01', '%Y-%m-%d').date()
+        import calendar
+        last_day = calendar.monthrange(start_date.year, start_date.month)[1]
+        end_date = start_date.replace(day=last_day)
+    else:
+        days_back = int(period) if period.isdigit() else 7
+        end_date = today - timedelta(days=1)
+        start_date = end_date - timedelta(days=days_back - 1)
+
+    spends = AdSpend.query.filter(
+        AdSpend.workspace_id == workspace_id,
+        AdSpend.date >= start_date,
+        AdSpend.date <= end_date,
+        AdSpend.platform == 'meta'
+    ).order_by(AdSpend.date.desc()).all()
+
+    total_spend = sum(s.spend for s in spends)
+    total_conversion_value = sum(s.conversion_value for s in spends)
+    total_clicks = sum(s.clicks for s in spends)
+    total_impressions = sum(s.impressions for s in spends)
+    total_conversions = sum(s.conversions for s in spends)
+    avg_ctr = round(total_clicks / total_impressions * 100, 2) if total_impressions > 0 else 0
+    avg_cpc = round(total_spend / total_clicks, 0) if total_clicks > 0 else 0
+    avg_cpm = round(total_spend / total_impressions * 1000, 0) if total_impressions > 0 else 0
+    overall_roas = round(total_conversion_value / total_spend, 2) if total_spend > 0 else 0
+    cpa = round(total_spend / total_conversions, 0) if total_conversions > 0 else 0
+
+    BREAKEVEN_ROAS = 1.27
+
+    from collections import defaultdict
+    campaign_map = defaultdict(lambda: {
+        'name': '', 'spend': 0, 'impressions': 0, 'clicks': 0,
+        'conversions': 0, 'conversion_value': 0
+    })
+    for s in spends:
+        c = campaign_map[s.campaign_id]
+        c['name'] = s.campaign_name
+        c['spend'] += s.spend
+        c['impressions'] += s.impressions
+        c['clicks'] += s.clicks
+        c['conversions'] += s.conversions
+        c['conversion_value'] += s.conversion_value
+
+    campaigns = []
+    for cid, c in campaign_map.items():
+        c['ctr'] = round(c['clicks'] / c['impressions'] * 100, 2) if c['impressions'] > 0 else 0
+        c['cpc'] = round(c['spend'] / c['clicks'], 0) if c['clicks'] > 0 else 0
+        c['roas'] = round(c['conversion_value'] / c['spend'], 2) if c['spend'] > 0 else 0
+        if c['roas'] >= BREAKEVEN_ROAS * 1.3:
+            c['efficiency'] = 'good'
+            c['efficiency_label'] = '우수'
+        elif c['roas'] >= BREAKEVEN_ROAS:
+            c['efficiency'] = 'ok'
+            c['efficiency_label'] = '양호'
+        elif c['conversions'] == 0 and c['spend'] > 50000:
+            c['efficiency'] = 'bad'
+            c['efficiency_label'] = '중단 검토'
+        else:
+            c['efficiency'] = 'warn'
+            c['efficiency_label'] = '주의'
+        campaigns.append(c)
+
+    campaigns.sort(key=lambda x: x['roas'], reverse=True)
+
+    daily_map = defaultdict(lambda: {'spend': 0, 'conversion_value': 0, 'ctr': 0, 'cpm': 0, 'count': 0})
+    for s in spends:
+        d = str(s.date)
+        daily_map[d]['spend'] += s.spend
+        daily_map[d]['conversion_value'] += s.conversion_value
+        daily_map[d]['ctr'] += s.ctr
+        daily_map[d]['cpm'] += s.cpm
+        daily_map[d]['count'] += 1
+
+    daily_labels = sorted(daily_map.keys())
+    daily_spend = [round(daily_map[d]['spend']) for d in daily_labels]
+    daily_revenue = [round(daily_map[d]['conversion_value']) for d in daily_labels]
+    daily_ctr = [round(daily_map[d]['ctr'] / daily_map[d]['count'], 2) if daily_map[d]['count'] > 0 else 0 for d in daily_labels]
+    daily_cpm = [round(daily_map[d]['cpm'] / daily_map[d]['count']) if daily_map[d]['count'] > 0 else 0 for d in daily_labels]
+
+    alerts = [c for c in campaigns if c['efficiency'] == 'bad']
+
+    available_months = db.session.query(
+        db.func.strftime('%Y-%m', AdSpend.date)
+    ).filter_by(workspace_id=workspace_id).distinct().order_by(
+        db.func.strftime('%Y-%m', AdSpend.date).desc()
+    ).all()
+    available_months = [m[0] for m in available_months]
+
+    return render_template('ads_dashboard.html',
+        active_page='ads_dashboard',
+        has_token=has_token,
+        total_spend=total_spend,
+        total_conversion_value=total_conversion_value,
+        overall_roas=overall_roas,
+        avg_ctr=avg_ctr,
+        avg_cpc=avg_cpc,
+        avg_cpm=avg_cpm,
+        total_conversions=total_conversions,
+        cpa=cpa,
+        campaigns=campaigns,
+        alerts=alerts,
+        daily_labels=json.dumps(daily_labels),
+        daily_spend=json.dumps(daily_spend),
+        daily_revenue=json.dumps(daily_revenue),
+        daily_ctr=json.dumps(daily_ctr),
+        daily_cpm=json.dumps(daily_cpm),
+        period=period,
+        start_date=str(start_date),
+        end_date=str(end_date),
+        available_months=available_months,
+        selected_month=selected_month,
+        BREAKEVEN_ROAS=BREAKEVEN_ROAS
+    )
+
+
+# APScheduler: 매일 새벽 2시 자동 수집
+scheduler = BackgroundScheduler(timezone='Asia/Seoul')
+scheduler.add_job(run_daily_meta_fetch, CronTrigger(hour=2, minute=0))
+if not scheduler.running:
+    scheduler.start()
+atexit.register(lambda: scheduler.shutdown(wait=False))
 
 with app.app_context():
     try:
