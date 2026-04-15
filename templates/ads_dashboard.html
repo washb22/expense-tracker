@@ -32,10 +32,10 @@
 <!-- 경고 배너 -->
 {% if alerts %}
 <div style="background:rgba(220,53,69,0.15);border:1px solid rgba(220,53,69,0.3);border-radius:8px;padding:14px;margin-bottom:20px">
-    <strong style="color:#dc3545">주의가 필요한 캠페인</strong>
-    {% for c in alerts %}
+    <strong style="color:#dc3545">주의가 필요한 항목</strong>
+    {% for a in alerts %}
     <div style="margin-top:6px;color:#dc3545;font-size:14px">
-        · {{ c.name }} — {{ '{:,.0f}'.format(c.spend) }}원 집행, 전환 0건 ({{ c.spend|round(0)|int }}원 낭비 중)
+        · [{{ a.level_label }}] {{ a.name }} — {{ '{:,.0f}'.format(a.spend) }}원 집행, 전환 0건
     </div>
     {% endfor %}
 </div>
@@ -106,15 +106,49 @@
     </div>
 </div>
 
-<!-- 캠페인 테이블 -->
+<!-- 캠페인/세트/소재 트리 테이블 -->
 <div class="card">
-    <h3 style="margin-bottom:16px">캠페인별 효율 분석</h3>
+    <h3 style="margin-bottom:16px">캠페인 → 세트 → 소재 효율 분석</h3>
+    <p style="font-size:12px;color:#888;margin-bottom:12px">▸ 클릭하면 하위 세트/소재가 펼쳐집니다.</p>
     {% if campaigns %}
+    {% macro render_row(node, depth=0, parent_id='', idx=0) %}
+        {% set row_id = parent_id ~ '-' ~ idx %}
+        <tr class="ads-row depth-{{ depth }}" data-row-id="{{ row_id }}" {% if depth > 0 %}data-parent="{{ parent_id }}" style="display:none;background:{% if depth==1 %}rgba(0,0,0,0.02){% else %}rgba(0,0,0,0.04){% endif %}"{% endif %}>
+            <td style="padding-left:{{ 12 + depth * 20 }}px">
+                {% if node.children %}
+                <span class="toggle" data-target="{{ row_id }}" style="cursor:pointer;display:inline-block;width:14px;color:#888">▸</span>
+                {% else %}
+                <span style="display:inline-block;width:14px"></span>
+                {% endif %}
+                <span style="font-size:10px;padding:1px 5px;border-radius:3px;background:{% if depth==0 %}#e3f2fd;color:#1976d2{% elif depth==1 %}#f3e5f5;color:#7b1fa2{% else %}#fff3e0;color:#e65100{% endif %};margin-right:6px">
+                    {% if depth==0 %}캠페인{% elif depth==1 %}세트{% else %}소재{% endif %}
+                </span>
+                {{ node.name }}
+            </td>
+            <td>{{ '{:,.0f}'.format(node.spend) }}원</td>
+            <td>{{ '{:,}'.format(node.impressions) }}</td>
+            <td style="color:{% if node.ctr >= 3 %}#28a745{% elif node.ctr >= 1.5 %}#ffc107{% else %}#dc3545{% endif %}">{{ node.ctr }}%</td>
+            <td>{{ '{:,.0f}'.format(node.cpc) }}원</td>
+            <td>{{ node.conversions }}건</td>
+            <td style="color:{% if node.roas >= BREAKEVEN_ROAS %}#28a745{% elif node.roas > 0 %}#ffc107{% else %}#dc3545{% endif %};font-weight:500">{{ node.roas }}</td>
+            <td>
+                <span style="display:inline-block;font-size:11px;padding:2px 8px;border-radius:10px;font-weight:500;
+                    background:{% if node.efficiency=='good' %}rgba(40,167,69,0.15){% elif node.efficiency=='ok' %}rgba(40,167,69,0.1){% elif node.efficiency=='warn' %}rgba(255,193,7,0.15){% else %}rgba(220,53,69,0.15){% endif %};
+                    color:{% if node.efficiency in ['good','ok'] %}#28a745{% elif node.efficiency=='warn' %}#856404{% else %}#dc3545{% endif %}">
+                    {{ node.efficiency_label }}
+                </span>
+            </td>
+        </tr>
+        {% for child in node.children %}
+            {{ render_row(child, depth + 1, row_id, loop.index) }}
+        {% endfor %}
+    {% endmacro %}
+
     <div class="table-responsive">
         <table class="table" style="font-size:13px">
             <thead>
                 <tr>
-                    <th>캠페인명</th>
+                    <th>이름</th>
                     <th>광고비</th>
                     <th>노출</th>
                     <th>CTR</th>
@@ -126,26 +160,7 @@
             </thead>
             <tbody>
                 {% for c in campaigns %}
-                <tr>
-                    <td>{{ c.name }}</td>
-                    <td>{{ '{:,.0f}'.format(c.spend) }}원</td>
-                    <td>{{ '{:,}'.format(c.impressions) }}</td>
-                    <td style="color:{% if c.ctr >= 3 %}#28a745{% elif c.ctr >= 1.5 %}#ffc107{% else %}#dc3545{% endif %}">
-                        {{ c.ctr }}%
-                    </td>
-                    <td>{{ '{:,.0f}'.format(c.cpc) }}원</td>
-                    <td>{{ c.conversions }}건</td>
-                    <td style="color:{% if c.roas >= BREAKEVEN_ROAS %}#28a745{% elif c.roas > 0 %}#ffc107{% else %}#dc3545{% endif %};font-weight:500">
-                        {{ c.roas }}
-                    </td>
-                    <td>
-                        <span style="display:inline-block;font-size:11px;padding:2px 8px;border-radius:10px;font-weight:500;
-                            background:{% if c.efficiency=='good' %}rgba(40,167,69,0.15){% elif c.efficiency=='ok' %}rgba(40,167,69,0.1){% elif c.efficiency=='warn' %}rgba(255,193,7,0.15){% else %}rgba(220,53,69,0.15){% endif %};
-                            color:{% if c.efficiency in ['good','ok'] %}#28a745{% elif c.efficiency=='warn' %}#856404{% else %}#dc3545{% endif %}">
-                            {{ c.efficiency_label }}
-                        </span>
-                    </td>
-                </tr>
+                    {{ render_row(c, 0, 'r', loop.index) }}
                 {% endfor %}
             </tbody>
         </table>
@@ -157,6 +172,29 @@
     </p>
     {% endif %}
 </div>
+
+<script>
+document.querySelectorAll('.toggle').forEach(t => {
+    t.addEventListener('click', () => {
+        const target = t.dataset.target;
+        const isOpen = t.textContent.trim() === '▾';
+        t.textContent = isOpen ? '▸' : '▾';
+        // 직계 자식만 토글
+        document.querySelectorAll(`.ads-row[data-parent="${target}"]`).forEach(row => {
+            if (isOpen) {
+                row.style.display = 'none';
+                // 모든 후손도 숨기고 토글 마크 리셋
+                document.querySelectorAll(`.ads-row[data-parent^="${target}-"]`).forEach(r => {
+                    r.style.display = 'none';
+                });
+                document.querySelectorAll(`.ads-row[data-parent^="${target}-"] .toggle, .ads-row[data-parent="${target}"] .toggle`).forEach(s => s.textContent = '▸');
+            } else {
+                row.style.display = '';
+            }
+        });
+    });
+});
+</script>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script>

@@ -209,6 +209,10 @@ class AdSpend(db.Model):
     platform = db.Column(db.String(50), default='meta')
     campaign_id = db.Column(db.String(100))
     campaign_name = db.Column(db.String(200))
+    adset_id = db.Column(db.String(100))
+    adset_name = db.Column(db.String(200))
+    ad_id = db.Column(db.String(100))
+    ad_name = db.Column(db.String(200))
     spend = db.Column(db.Float, default=0)
     impressions = db.Column(db.Integer, default=0)
     clicks = db.Column(db.Integer, default=0)
@@ -221,7 +225,7 @@ class AdSpend(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     __table_args__ = (
-        db.UniqueConstraint('workspace_id', 'date', 'platform', 'campaign_id', name='uq_adspend_campaign_daily'),
+        db.UniqueConstraint('workspace_id', 'date', 'platform', 'ad_id', name='uq_adspend_ad_daily'),
     )
 
 @login_manager.user_loader
@@ -1302,6 +1306,29 @@ def admin_delete_user(user_id):
 # 메타 광고 자동수집 / 대시보드
 # ============================================
 
+def migrate_ad_spend_columns():
+    """ad_spend 테이블에 누락된 컬럼을 ALTER TABLE로 추가"""
+    from sqlalchemy import inspect, text
+    inspector = inspect(db.engine)
+    if 'ad_spend' not in inspector.get_table_names():
+        return
+    existing_cols = {c['name'] for c in inspector.get_columns('ad_spend')}
+    new_cols = {
+        'adset_id': 'VARCHAR(100)',
+        'adset_name': 'VARCHAR(200)',
+        'ad_id': 'VARCHAR(100)',
+        'ad_name': 'VARCHAR(200)',
+    }
+    with db.engine.begin() as conn:
+        for col, coltype in new_cols.items():
+            if col not in existing_cols:
+                try:
+                    conn.execute(text(f'ALTER TABLE ad_spend ADD COLUMN {col} {coltype}'))
+                    print(f"[Migration] ad_spend.{col} 추가")
+                except Exception as e:
+                    print(f"[Migration] {col} 추가 실패: {e}")
+
+
 def fetch_meta_ads_for_workspace(workspace_id, access_token, ad_account_id, target_date=None):
     if not access_token or not ad_account_id:
         return {'status': 'skip', 'message': '토큰 없음'}
@@ -1314,16 +1341,18 @@ def fetch_meta_ads_for_workspace(workspace_id, access_token, ad_account_id, targ
         'access_token': access_token,
         'time_range': json.dumps({"since": target_date, "until": target_date}),
         'fields': ','.join([
-            'campaign_id', 'campaign_name', 'spend',
-            'impressions', 'clicks', 'ctr', 'cpc', 'cpm',
+            'campaign_id', 'campaign_name',
+            'adset_id', 'adset_name',
+            'ad_id', 'ad_name',
+            'spend', 'impressions', 'clicks', 'ctr', 'cpc', 'cpm',
             'actions', 'action_values', 'purchase_roas'
         ]),
-        'level': 'campaign',
-        'limit': 200,
+        'level': 'ad',
+        'limit': 500,
     }
 
     try:
-        resp = requests.get(url, params=params, timeout=20)
+        resp = requests.get(url, params=params, timeout=30)
         data = resp.json()
 
         if 'error' in data:
@@ -1331,6 +1360,7 @@ def fetch_meta_ads_for_workspace(workspace_id, access_token, ad_account_id, targ
 
         rows = data.get('data', [])
         saved = 0
+        date_obj = datetime.strptime(target_date, '%Y-%m-%d').date()
 
         for row in rows:
             spend = float(row.get('spend', 0))
@@ -1355,42 +1385,41 @@ def fetch_meta_ads_for_workspace(workspace_id, access_token, ad_account_id, targ
                 round(conversion_value / spend, 2) if spend > 0 else 0
             )
 
-            date_obj = datetime.strptime(target_date, '%Y-%m-%d').date()
-
+            ad_id = row.get('ad_id', '')
             existing = AdSpend.query.filter_by(
                 workspace_id=workspace_id,
                 date=date_obj,
                 platform='meta',
-                campaign_id=row.get('campaign_id', '')
+                ad_id=ad_id
             ).first()
 
+            payload = dict(
+                campaign_id=row.get('campaign_id', ''),
+                campaign_name=row.get('campaign_name', ''),
+                adset_id=row.get('adset_id', ''),
+                adset_name=row.get('adset_name', ''),
+                ad_id=ad_id,
+                ad_name=row.get('ad_name', ''),
+                spend=spend,
+                impressions=impressions,
+                clicks=clicks,
+                ctr=ctr,
+                cpc=cpc,
+                cpm=cpm,
+                conversions=conversions,
+                conversion_value=conversion_value,
+                roas=roas,
+            )
+
             if existing:
-                existing.spend = spend
-                existing.impressions = impressions
-                existing.clicks = clicks
-                existing.ctr = ctr
-                existing.cpc = cpc
-                existing.cpm = cpm
-                existing.conversions = conversions
-                existing.conversion_value = conversion_value
-                existing.roas = roas
-                existing.campaign_name = row.get('campaign_name', '')
+                for k, v in payload.items():
+                    setattr(existing, k, v)
             else:
                 db.session.add(AdSpend(
                     workspace_id=workspace_id,
                     date=date_obj,
                     platform='meta',
-                    campaign_id=row.get('campaign_id', ''),
-                    campaign_name=row.get('campaign_name', ''),
-                    spend=spend,
-                    impressions=impressions,
-                    clicks=clicks,
-                    ctr=ctr,
-                    cpc=cpc,
-                    cpm=cpm,
-                    conversions=conversions,
-                    conversion_value=conversion_value,
-                    roas=roas
+                    **payload
                 ))
             saved += 1
 
@@ -1520,39 +1549,59 @@ def ads_dashboard(membership):
 
     BREAKEVEN_ROAS = 1.27
 
+    def judge_efficiency(roas, conversions, spend):
+        if roas >= BREAKEVEN_ROAS * 1.3:
+            return 'good', '우수'
+        if roas >= BREAKEVEN_ROAS:
+            return 'ok', '양호'
+        if conversions == 0 and spend > 50000:
+            return 'bad', '중단 검토'
+        return 'warn', '주의'
+
+    def make_node(name, level):
+        return {
+            'name': name, 'level': level,
+            'spend': 0, 'impressions': 0, 'clicks': 0,
+            'conversions': 0, 'conversion_value': 0,
+            'children': {},
+        }
+
     from collections import defaultdict
-    campaign_map = defaultdict(lambda: {
-        'name': '', 'spend': 0, 'impressions': 0, 'clicks': 0,
-        'conversions': 0, 'conversion_value': 0
-    })
+    # 캠페인 → 세트 → 광고 트리 집계
+    tree = {}
     for s in spends:
-        c = campaign_map[s.campaign_id]
-        c['name'] = s.campaign_name
-        c['spend'] += s.spend
-        c['impressions'] += s.impressions
-        c['clicks'] += s.clicks
-        c['conversions'] += s.conversions
-        c['conversion_value'] += s.conversion_value
+        cid = s.campaign_id or '(unknown)'
+        aid = s.adset_id or '(unknown)'
+        ad_id = s.ad_id or '(unknown)'
 
-    campaigns = []
-    for cid, c in campaign_map.items():
-        c['ctr'] = round(c['clicks'] / c['impressions'] * 100, 2) if c['impressions'] > 0 else 0
-        c['cpc'] = round(c['spend'] / c['clicks'], 0) if c['clicks'] > 0 else 0
-        c['roas'] = round(c['conversion_value'] / c['spend'], 2) if c['spend'] > 0 else 0
-        if c['roas'] >= BREAKEVEN_ROAS * 1.3:
-            c['efficiency'] = 'good'
-            c['efficiency_label'] = '우수'
-        elif c['roas'] >= BREAKEVEN_ROAS:
-            c['efficiency'] = 'ok'
-            c['efficiency_label'] = '양호'
-        elif c['conversions'] == 0 and c['spend'] > 50000:
-            c['efficiency'] = 'bad'
-            c['efficiency_label'] = '중단 검토'
-        else:
-            c['efficiency'] = 'warn'
-            c['efficiency_label'] = '주의'
-        campaigns.append(c)
+        camp = tree.setdefault(cid, make_node(s.campaign_name or '(미상 캠페인)', 'campaign'))
+        adset = camp['children'].setdefault(aid, make_node(s.adset_name or '(미상 세트)', 'adset'))
+        ad = adset['children'].setdefault(ad_id, make_node(s.ad_name or '(미상 소재)', 'ad'))
 
+        for node in (camp, adset, ad):
+            node['spend'] += s.spend
+            node['impressions'] += s.impressions
+            node['clicks'] += s.clicks
+            node['conversions'] += s.conversions
+            node['conversion_value'] += s.conversion_value
+        ad['ad_id'] = ad_id
+
+    def finalize(node):
+        node['ctr'] = round(node['clicks'] / node['impressions'] * 100, 2) if node['impressions'] > 0 else 0
+        node['cpc'] = round(node['spend'] / node['clicks'], 0) if node['clicks'] > 0 else 0
+        node['cpm'] = round(node['spend'] / node['impressions'] * 1000, 0) if node['impressions'] > 0 else 0
+        node['roas'] = round(node['conversion_value'] / node['spend'], 2) if node['spend'] > 0 else 0
+        node['cpa'] = round(node['spend'] / node['conversions'], 0) if node['conversions'] > 0 else 0
+        node['efficiency'], node['efficiency_label'] = judge_efficiency(node['roas'], node['conversions'], node['spend'])
+        children_list = []
+        for child in node['children'].values():
+            finalize(child)
+            children_list.append(child)
+        children_list.sort(key=lambda x: x['roas'], reverse=True)
+        node['children'] = children_list
+        return node
+
+    campaigns = [finalize(c) for c in tree.values()]
     campaigns.sort(key=lambda x: x['roas'], reverse=True)
 
     daily_map = defaultdict(lambda: {'spend': 0, 'conversion_value': 0, 'ctr': 0, 'cpm': 0, 'count': 0})
@@ -1570,7 +1619,20 @@ def ads_dashboard(membership):
     daily_ctr = [round(daily_map[d]['ctr'] / daily_map[d]['count'], 2) if daily_map[d]['count'] > 0 else 0 for d in daily_labels]
     daily_cpm = [round(daily_map[d]['cpm'] / daily_map[d]['count']) if daily_map[d]['count'] > 0 else 0 for d in daily_labels]
 
-    alerts = [c for c in campaigns if c['efficiency'] == 'bad']
+    # 효율 'bad'인 노드를 모든 레벨에서 수집
+    alerts = []
+    level_label = {'campaign': '캠페인', 'adset': '세트', 'ad': '소재'}
+    def collect_alerts(node):
+        if node['efficiency'] == 'bad':
+            alerts.append({
+                'name': node['name'],
+                'spend': node['spend'],
+                'level_label': level_label.get(node['level'], '')
+            })
+        for ch in node['children']:
+            collect_alerts(ch)
+    for c in campaigns:
+        collect_alerts(c)
 
     available_months = db.session.query(
         db.func.strftime('%Y-%m', AdSpend.date)
@@ -1616,6 +1678,7 @@ atexit.register(lambda: scheduler.shutdown(wait=False))
 with app.app_context():
     try:
         db.create_all()
+        migrate_ad_spend_columns()
     except Exception as e:
         print(f"Database initialization error: {e}")
 
