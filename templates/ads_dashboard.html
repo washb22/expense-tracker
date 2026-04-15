@@ -18,16 +18,29 @@
 {% endif %}
 
 <!-- 기간 필터 -->
-<div class="month-filters" style="margin-bottom:20px">
+<div class="month-filters" style="margin-bottom:12px">
     <a href="{{ url_for('ads_dashboard', period='7') }}"
        class="btn {{ 'btn-active' if period=='7' and not selected_month else 'btn-secondary' }}">최근 7일</a>
     <a href="{{ url_for('ads_dashboard', period='30') }}"
        class="btn {{ 'btn-active' if period=='30' and not selected_month else 'btn-secondary' }}">최근 30일</a>
+    <a href="{{ url_for('ads_dashboard', period='90') }}"
+       class="btn {{ 'btn-active' if period=='90' and not selected_month else 'btn-secondary' }}">최근 90일</a>
     {% for month in available_months %}
     <a href="{{ url_for('ads_dashboard', month=month) }}"
        class="btn {{ 'btn-active' if selected_month == month else 'btn-secondary' }}">{{ month }}</a>
     {% endfor %}
 </div>
+
+<!-- 사용자 지정 기간 -->
+<form method="GET" action="{{ url_for('ads_dashboard') }}"
+      style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:20px;padding:10px;background:rgba(0,0,0,0.03);border-radius:6px">
+    <span style="font-size:13px;color:#666">📅 직접 기간 선택:</span>
+    <input type="date" name="start_date" value="{{ start_date }}" class="form-control" style="width:160px">
+    <span>~</span>
+    <input type="date" name="end_date" value="{{ end_date }}" class="form-control" style="width:160px">
+    <button type="submit" class="btn btn-primary" style="padding:6px 14px">조회</button>
+    <a href="{{ url_for('ads_dashboard') }}" style="font-size:12px;color:#888;margin-left:8px">초기화</a>
+</form>
 
 <!-- 경고 배너 -->
 {% if alerts %}
