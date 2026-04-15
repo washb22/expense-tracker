@@ -78,10 +78,22 @@
                 <tr id="product-{{ product.id }}">
                     <td><strong>{{ product.name }}</strong></td>
                     <td>{{ product.sku or '-' }}</td>
-                    <td>{{ '{:,.0f}'.format(product.cost_price) }} 원</td>
+                    <td>{{ '{:,.0f}'.format(product.cost_price) }} 원
+                        {% set cnt = sale_counts.get(product.id, 0) %}
+                        {% if cnt > 0 %}
+                        <small style="display:block;color:#888;font-size:11px">매출 {{ cnt }}건 연결됨</small>
+                        {% endif %}
+                    </td>
                     <td>{{ product.category or '-' }}</td>
                     <td>{{ product.created_at.strftime('%Y-%m-%d') }}</td>
                     <td>
+                        <button class="btn btn-secondary btn-sm edit-product-btn"
+                                data-id="{{ product.id }}"
+                                data-name="{{ product.name }}"
+                                data-sku="{{ product.sku or '' }}"
+                                data-cost="{{ product.cost_price }}"
+                                data-category="{{ product.category or '' }}"
+                                data-sale-count="{{ cnt }}">수정</button>
                         <button class="btn btn-danger btn-sm delete-product-btn" data-id="{{ product.id }}" data-name="{{ product.name }}">삭제</button>
                     </td>
                 </tr>
@@ -151,8 +163,100 @@
 </div>
 {% endif %}
 
+<!-- 제품 수정 모달 -->
+<div id="editProductModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9998;align-items:center;justify-content:center">
+    <div style="background:white;padding:24px;border-radius:8px;width:480px;max-width:90vw;max-height:90vh;overflow:auto">
+        <h3 style="margin-top:0">제품 수정</h3>
+        <form id="editProductForm" method="POST">
+            <div class="form-group">
+                <label>제품명</label>
+                <input type="text" name="name" id="edit-name" class="form-control" required>
+            </div>
+            <div class="form-group">
+                <label>상품코드</label>
+                <input type="text" name="sku" id="edit-sku" class="form-control">
+            </div>
+            <div class="form-group">
+                <label>제품원가 (원)</label>
+                <input type="number" name="cost_price" id="edit-cost" class="form-control" required>
+                <small id="edit-cost-old" style="color:#888"></small>
+            </div>
+            <div class="form-group">
+                <label>카테고리</label>
+                <input type="text" name="category" id="edit-category" class="form-control">
+            </div>
+            <div id="edit-recalc-section" style="background:#fff8e1;border:1px solid #ffc107;padding:12px;border-radius:6px;margin:16px 0;display:none">
+                <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer">
+                    <input type="checkbox" name="recalculate" id="edit-recalculate" style="margin-top:3px">
+                    <div>
+                        <strong>과거 매출 <span id="edit-sale-count">0</span>건도 새 원가로 재계산</strong>
+                        <div style="font-size:12px;color:#666;margin-top:4px">
+                            ☑ 체크: 입력 실수 정정 시 (모든 과거 매출 원가/순이익 새로 계산)<br>
+                            ☐ 체크 없음: 시점별 원가 변동 (앞으로 등록되는 매출만 새 원가 적용)
+                        </div>
+                    </div>
+                </label>
+            </div>
+            <div style="display:flex;gap:8px;justify-content:flex-end">
+                <button type="button" class="btn btn-secondary" onclick="closeEditModal()">취소</button>
+                <button type="submit" class="btn btn-primary">저장</button>
+            </div>
+        </form>
+    </div>
+</div>
+
 <script>
+function closeEditModal() {
+    document.getElementById('editProductModal').style.display = 'none';
+}
+
 document.addEventListener('DOMContentLoaded', function() {
+    // 제품 수정 모달 열기
+    document.querySelectorAll('.edit-product-btn').forEach(button => {
+        button.addEventListener('click', function() {
+            const d = this.dataset;
+            document.getElementById('edit-name').value = d.name;
+            document.getElementById('edit-sku').value = d.sku;
+            document.getElementById('edit-cost').value = d.cost;
+            document.getElementById('edit-category').value = d.category;
+            document.getElementById('edit-cost-old').textContent = `현재: ${parseInt(d.cost).toLocaleString()}원`;
+            document.getElementById('editProductForm').action = `/business/products/edit/${d.id}`;
+
+            const cnt = parseInt(d.saleCount || 0);
+            const recalcSection = document.getElementById('edit-recalc-section');
+            if (cnt > 0) {
+                document.getElementById('edit-sale-count').textContent = cnt;
+                recalcSection.style.display = 'block';
+                document.getElementById('edit-recalculate').checked = false;
+            } else {
+                recalcSection.style.display = 'none';
+            }
+
+            const modal = document.getElementById('editProductModal');
+            modal.style.display = 'flex';
+        });
+    });
+
+    // 모달 외부 클릭 닫기
+    document.getElementById('editProductModal').addEventListener('click', function(e) {
+        if (e.target === this) closeEditModal();
+    });
+
+    // 재계산 체크 시 원가 변경 여부 확인 다이얼로그
+    document.getElementById('editProductForm').addEventListener('submit', function(e) {
+        const newCost = parseInt(document.getElementById('edit-cost').value);
+        const oldCostText = document.getElementById('edit-cost-old').textContent;
+        const oldCost = parseInt(oldCostText.replace(/[^0-9]/g, '')) || 0;
+        const recalc = document.getElementById('edit-recalculate').checked;
+        const cnt = document.getElementById('edit-sale-count').textContent;
+
+        if (recalc && newCost !== oldCost && parseInt(cnt) > 0) {
+            if (!confirm(`정말 과거 매출 ${cnt}건의 원가/순이익을 새 원가(${newCost.toLocaleString()}원)로 재계산할까요?\n이 작업은 되돌릴 수 없습니다.`)) {
+                e.preventDefault();
+            }
+        }
+    });
+
     // 알림 메시지 표시 함수
     function showToast(message, type = 'success') {
         const toast = document.createElement('div');

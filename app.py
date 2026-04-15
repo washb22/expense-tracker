@@ -861,7 +861,15 @@ def business_products(membership):
     workspace_id = membership.workspace_id
     products = Product.query.filter_by(workspace_id=workspace_id).all()
     platforms = Platform.query.filter_by(workspace_id=workspace_id).all()
-    return render_template('business_products.html', active_page='business_products', products=products, platforms=platforms)
+
+    # 제품별 매출 건수 집계 (재계산 영향 표시용)
+    sale_counts_raw = db.session.query(
+        Sale.product_id, db.func.count(Sale.id)
+    ).filter_by(workspace_id=workspace_id).group_by(Sale.product_id).all()
+    sale_counts = {pid: cnt for pid, cnt in sale_counts_raw}
+
+    return render_template('business_products.html', active_page='business_products',
+                           products=products, platforms=platforms, sale_counts=sale_counts)
 
 @app.route('/business/products/add', methods=['POST'])
 @login_required
@@ -870,6 +878,54 @@ def add_product(membership):
     db.session.add(Product(name=request.form.get('name'), sku=request.form.get('sku', ''), cost_price=int(request.form.get('cost_price', 0)), category=request.form.get('category', ''), workspace_id=membership.workspace_id))
     db.session.commit()
     flash('제품이 추가되었습니다.', 'success')
+    return redirect(url_for('business_products'))
+
+
+@app.route('/business/products/edit/<int:product_id>', methods=['POST'])
+@login_required
+@role_required(menu='business_products')
+def edit_product(product_id, membership):
+    workspace_id = membership.workspace_id
+    product = Product.query.filter_by(id=product_id, workspace_id=workspace_id).first()
+    if not product:
+        flash('제품을 찾을 수 없습니다.', 'error')
+        return redirect(url_for('business_products'))
+
+    try:
+        new_name = request.form.get('name', '').strip()
+        new_sku = request.form.get('sku', '').strip()
+        new_cost = int(request.form.get('cost_price', 0))
+        new_category = request.form.get('category', '').strip()
+        recalculate = request.form.get('recalculate') == 'on'
+
+        old_cost = product.cost_price
+        product.name = new_name
+        product.sku = new_sku
+        product.cost_price = new_cost
+        product.category = new_category
+
+        recalc_count = 0
+        if recalculate and old_cost != new_cost:
+            # 같은 워크스페이스 + 이 제품의 매출만 재계산
+            sales_to_update = Sale.query.filter_by(
+                product_id=product.id,
+                workspace_id=workspace_id
+            ).all()
+            for s in sales_to_update:
+                s.total_cost_amount = new_cost * s.quantity
+                s.net_profit = s.total_selling_amount - s.total_cost_amount - s.commission_amount
+                recalc_count += 1
+
+        db.session.commit()
+
+        if recalculate and old_cost != new_cost:
+            flash(f'제품 수정 완료. 과거 매출 {recalc_count}건이 새 원가({new_cost:,}원)로 재계산되었습니다.', 'success')
+        else:
+            flash('제품이 수정되었습니다. (과거 매출은 기존 원가 유지)', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'수정 중 오류 발생: {e}', 'error')
+
     return redirect(url_for('business_products'))
 
 @app.route('/business/platforms/add', methods=['POST'])
