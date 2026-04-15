@@ -1307,11 +1307,13 @@ def admin_delete_user(user_id):
 # ============================================
 
 def migrate_ad_spend_columns():
-    """ad_spend 테이블에 누락된 컬럼을 ALTER TABLE로 추가"""
+    """ad_spend 테이블에 누락된 컬럼 추가 + 유니크 제약 재구성"""
     from sqlalchemy import inspect, text
     inspector = inspect(db.engine)
     if 'ad_spend' not in inspector.get_table_names():
         return
+
+    # 1) 누락된 컬럼 ALTER TABLE ADD
     existing_cols = {c['name'] for c in inspector.get_columns('ad_spend')}
     new_cols = {
         'adset_id': 'VARCHAR(100)',
@@ -1327,6 +1329,55 @@ def migrate_ad_spend_columns():
                     print(f"[Migration] ad_spend.{col} 추가")
                 except Exception as e:
                     print(f"[Migration] {col} 추가 실패: {e}")
+
+    # 2) 유니크 제약 재구성 (구 campaign_id 기반 → 신 ad_id 기반)
+    inspector = inspect(db.engine)  # 새로고침
+    try:
+        constraints = inspector.get_unique_constraints('ad_spend')
+    except Exception:
+        constraints = []
+    constraint_names = {c.get('name') for c in constraints}
+
+    needs_rebuild = (
+        'uq_adspend_campaign_daily' in constraint_names
+        or 'uq_adspend_ad_daily' not in constraint_names
+    )
+    if not needs_rebuild:
+        return
+
+    print("[Migration] ad_spend 유니크 제약 재구성 시작")
+    try:
+        old_cols_info = inspector.get_columns('ad_spend')
+        old_cols = [c['name'] for c in old_cols_info]
+        new_cols_set = {c.name for c in AdSpend.__table__.columns}
+        common = [c for c in old_cols if c in new_cols_set]
+        cols_csv = ', '.join(common)
+
+        with db.engine.begin() as conn:
+            conn.execute(text('ALTER TABLE ad_spend RENAME TO ad_spend_old'))
+
+        AdSpend.__table__.create(db.engine)
+
+        with db.engine.begin() as conn:
+            conn.execute(text(
+                f'INSERT INTO ad_spend ({cols_csv}) SELECT {cols_csv} FROM ad_spend_old'
+            ))
+            # ad_id 없는 옛 캠페인 레벨 행은 새 트리 뷰에서 의미없으므로 제거
+            conn.execute(text("DELETE FROM ad_spend WHERE ad_id IS NULL OR ad_id = ''"))
+            conn.execute(text('DROP TABLE ad_spend_old'))
+        print("[Migration] ad_spend 재구성 완료")
+    except Exception as e:
+        print(f"[Migration] 재구성 실패: {e}")
+        # 롤백 시도 (rename 후 실패한 경우)
+        try:
+            with db.engine.begin() as conn:
+                inspector2 = inspect(db.engine)
+                tables = inspector2.get_table_names()
+                if 'ad_spend_old' in tables and 'ad_spend' not in tables:
+                    conn.execute(text('ALTER TABLE ad_spend_old RENAME TO ad_spend'))
+                    print("[Migration] 롤백 완료")
+        except Exception as e2:
+            print(f"[Migration] 롤백 실패: {e2}")
 
 
 def fetch_meta_ads_for_workspace(workspace_id, access_token, ad_account_id, target_date=None, start_date=None, end_date=None):
