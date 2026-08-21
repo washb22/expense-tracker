@@ -1,0 +1,24 @@
+name: MoneyLog safety refactor
+
+on:
+  push:
+    branches: [moneylog-safe-refactor]
+  pull_request:
+    branches: [main]
+
+jobs:
+  linux-safety-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -v
+      - run: python -m py_compile app.py db_init.py moneylog_maintenance/migrations.py scripts/*.py
+      - run: bash -n scripts/start_production.sh tests/test_start_production.sh
+      - name: Exercise production process topology
+        run: bash tests/test_start_production.sh

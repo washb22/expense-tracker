@@ -15,9 +15,6 @@ import io
 from authlib.integrations.flask_client import OAuth
 from dotenv import load_dotenv
 from functools import wraps
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
-import atexit
 import requests
 
 load_dotenv()
@@ -79,14 +76,17 @@ def role_required(role="member", menu=None):
             def redirect_to_fallback():
                 flash("이 페이지에 접근할 권한이 없습니다.", "error")
                 # 권한이 있는 페이지 리스트를 순서대로 확인
-                fallback_pages = ['business_dashboard', 'business_sales', 'ads_dashboard', 'dashboard', 'classify', 'manage_workspaces']
-                for page in fallback_pages:
-                    if page in user_permissions:
-                        # 페이지 이름에 맞는 함수(url)로 리디렉션합니다.
-                        # 'show_results'는 'classify' 페이지의 함수 이름입니다.
-                        if page == 'classify':
-                            return redirect(url_for('show_results'))
-                        return redirect(url_for(page))
+                fallback_pages = [
+                    ('business_dashboard', 'business_dashboard'),
+                    ('business_sales', 'business_sales'),
+                    ('ads_dashboard', 'ads_dashboard'),
+                    ('dashboard', 'index'),
+                    ('classify', 'show_results'),
+                    ('manage_workspaces', 'manage_workspaces'),
+                ]
+                for permission_name, endpoint in fallback_pages:
+                    if permission_name in user_permissions:
+                        return redirect(url_for(endpoint))
                 # 어떤 페이지 권한도 없다면 사업장 관리 페이지로
                 return redirect(url_for('manage_workspaces'))
 
@@ -1362,80 +1362,6 @@ def admin_delete_user(user_id):
 # 메타 광고 자동수집 / 대시보드
 # ============================================
 
-def migrate_ad_spend_columns():
-    """ad_spend 테이블에 누락된 컬럼 추가 + 유니크 제약 재구성"""
-    from sqlalchemy import inspect, text
-    inspector = inspect(db.engine)
-    if 'ad_spend' not in inspector.get_table_names():
-        return
-
-    # 1) 누락된 컬럼 ALTER TABLE ADD
-    existing_cols = {c['name'] for c in inspector.get_columns('ad_spend')}
-    new_cols = {
-        'adset_id': 'VARCHAR(100)',
-        'adset_name': 'VARCHAR(200)',
-        'ad_id': 'VARCHAR(100)',
-        'ad_name': 'VARCHAR(200)',
-    }
-    with db.engine.begin() as conn:
-        for col, coltype in new_cols.items():
-            if col not in existing_cols:
-                try:
-                    conn.execute(text(f'ALTER TABLE ad_spend ADD COLUMN {col} {coltype}'))
-                    print(f"[Migration] ad_spend.{col} 추가")
-                except Exception as e:
-                    print(f"[Migration] {col} 추가 실패: {e}")
-
-    # 2) 유니크 제약 재구성 (구 campaign_id 기반 → 신 ad_id 기반)
-    inspector = inspect(db.engine)  # 새로고침
-    try:
-        constraints = inspector.get_unique_constraints('ad_spend')
-    except Exception:
-        constraints = []
-    constraint_names = {c.get('name') for c in constraints}
-
-    needs_rebuild = (
-        'uq_adspend_campaign_daily' in constraint_names
-        or 'uq_adspend_ad_daily' not in constraint_names
-    )
-    if not needs_rebuild:
-        return
-
-    print("[Migration] ad_spend 유니크 제약 재구성 시작")
-    try:
-        old_cols_info = inspector.get_columns('ad_spend')
-        old_cols = [c['name'] for c in old_cols_info]
-        new_cols_set = {c.name for c in AdSpend.__table__.columns}
-        common = [c for c in old_cols if c in new_cols_set]
-        cols_csv = ', '.join(common)
-
-        with db.engine.begin() as conn:
-            conn.execute(text('ALTER TABLE ad_spend RENAME TO ad_spend_old'))
-
-        AdSpend.__table__.create(db.engine)
-
-        with db.engine.begin() as conn:
-            conn.execute(text(
-                f'INSERT INTO ad_spend ({cols_csv}) SELECT {cols_csv} FROM ad_spend_old'
-            ))
-            # ad_id 없는 옛 캠페인 레벨 행은 새 트리 뷰에서 의미없으므로 제거
-            conn.execute(text("DELETE FROM ad_spend WHERE ad_id IS NULL OR ad_id = ''"))
-            conn.execute(text('DROP TABLE ad_spend_old'))
-        print("[Migration] ad_spend 재구성 완료")
-    except Exception as e:
-        print(f"[Migration] 재구성 실패: {e}")
-        # 롤백 시도 (rename 후 실패한 경우)
-        try:
-            with db.engine.begin() as conn:
-                inspector2 = inspect(db.engine)
-                tables = inspector2.get_table_names()
-                if 'ad_spend_old' in tables and 'ad_spend' not in tables:
-                    conn.execute(text('ALTER TABLE ad_spend_old RENAME TO ad_spend'))
-                    print("[Migration] 롤백 완료")
-        except Exception as e2:
-            print(f"[Migration] 롤백 실패: {e2}")
-
-
 def fetch_meta_ads_for_workspace(workspace_id, access_token, ad_account_id, target_date=None, start_date=None, end_date=None):
     """target_date 단일 모드 또는 (start_date, end_date) 기간 모드"""
     if not access_token or not ad_account_id:
@@ -1805,20 +1731,6 @@ def ads_dashboard(membership):
         BREAKEVEN_ROAS=BREAKEVEN_ROAS
     )
 
-
-# APScheduler: 매일 새벽 2시 자동 수집
-scheduler = BackgroundScheduler(timezone='Asia/Seoul')
-scheduler.add_job(run_daily_meta_fetch, CronTrigger(hour=2, minute=0))
-if not scheduler.running:
-    scheduler.start()
-atexit.register(lambda: scheduler.shutdown(wait=False))
-
-with app.app_context():
-    try:
-        db.create_all()
-        migrate_ad_spend_columns()
-    except Exception as e:
-        print(f"Database initialization error: {e}")
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
