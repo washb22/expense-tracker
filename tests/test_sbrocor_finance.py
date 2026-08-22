@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 import uuid
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,6 +16,8 @@ from sbrocor_finance import finance_blueprint
 from sbrocor_finance.auth import sign_request
 from sbrocor_finance.config import FinanceConfigurationError, get_finance_database_path
 from sbrocor_finance.database import connect, initialize_database
+from sbrocor_finance.repository import FinanceRepository
+from sbrocor_finance.service import FinanceService
 
 
 SECRET_TEXT = "fixture-secret-that-is-at-least-thirty-two-bytes"
@@ -83,6 +86,20 @@ class FinanceApiTest(unittest.TestCase):
                 "INSERT INTO finance_transaction(id,workspace_id,date,merchant,amount,category) VALUES ('x',999,'2026-01-01','x',1,'x')"
             )
         connection.close()
+
+    def test_restricts_workspace_product_and_platform_deletes(self):
+        self.create_workspace(1)
+        self.request("POST", "/api/sbrocor/finance/v1/transactions?workspace_id=1", {"id": "t1", "date": "2026-01-01", "merchant": "M", "amount": 1, "category": "C"})
+        self.assertEqual(self.request("DELETE", "/api/sbrocor/finance/v1/workspaces/1").status_code, 409)
+
+        self.create_workspace(2)
+        self.request("POST", "/api/sbrocor/finance/v1/products?workspace_id=2", {"id": 21, "name": "P", "cost_price": 1})
+        self.request("POST", "/api/sbrocor/finance/v1/platforms?workspace_id=2", {"id": 22, "name": "C", "commission_rate": 1})
+        sale = {"id": "s2", "date": "2026-01-01", "product_id": 21, "platform_id": 22, "selling_price": 1, "quantity": 1, "total_selling_amount": 1, "total_cost_amount": 1, "commission_amount": 0, "net_profit": 0}
+        self.request("POST", "/api/sbrocor/finance/v1/sales?workspace_id=2", sale)
+        self.assertEqual(self.request("DELETE", "/api/sbrocor/finance/v1/workspaces/2").status_code, 409)
+        self.assertEqual(self.request("DELETE", "/api/sbrocor/finance/v1/products/21?workspace_id=2").status_code, 409)
+        self.assertEqual(self.request("DELETE", "/api/sbrocor/finance/v1/platforms/22?workspace_id=2").status_code, 409)
 
     def test_tracker_db_is_fail_closed(self):
         with patch.dict(os.environ, {"SBROCOR_FINANCE_DB_PATH": str(Path(self.tempdir.name) / "tracker.db")}, clear=False):
@@ -169,11 +186,61 @@ class FinanceApiTest(unittest.TestCase):
         manifest["transactions"][0]["id"] = "t2"
         dry = self.request("POST", "/api/sbrocor/finance/v1/workspaces/2/import?dry_run=true", manifest)
         self.assertTrue(dry.json["dry_run"])
-        applied = self.request("POST", "/api/sbrocor/finance/v1/workspaces/2/import?dry_run=false", manifest)
-        self.assertEqual(applied.status_code, 200, applied.get_data(as_text=True))
+        blocked = self.request("POST", "/api/sbrocor/finance/v1/workspaces/2/import?dry_run=false", manifest)
+        self.assertEqual(blocked.status_code, 403)
+        with closing(connect()) as connection:
+            applied = FinanceService(FinanceRepository(connection)).import_initial_manifest(2, manifest)
+        self.assertFalse(applied["dry_run"])
+        with closing(connect()) as connection:
+            with self.assertRaises(sqlite3.IntegrityError):
+                FinanceService(FinanceRepository(connection)).import_initial_manifest(2, manifest)
         self.assertEqual(self.request("GET", "/api/sbrocor/finance/v1/transactions?workspace_id=2").json["items"][0]["amount"], 300)
         dashboard = self.request("GET", "/api/sbrocor/finance/v1/dashboard?workspace_id=2")
         self.assertEqual(dashboard.json["total_expenses"], 300)
+        self.assertEqual(self.request("POST", "/api/sbrocor/finance/v1/workspaces/2/import?dry_run=false", manifest).status_code, 403)
+
+    def test_workspace_settings_round_trip_excludes_meta_token(self):
+        self.create_workspace(1)
+        with closing(connect()) as connection:
+            connection.execute(
+                "INSERT INTO workspace_settings(id,workspace_id,meta_ad_account_id,updated_at) VALUES (1,1,'act_123','2026-08-01')"
+            )
+            connection.commit()
+        exported = self.request("GET", "/api/sbrocor/finance/v1/workspaces/1/export")
+        serialized = exported.get_data(as_text=True)
+        self.assertEqual(exported.json["workspace_settings"]["meta_ad_account_id"], "act_123")
+        self.assertNotIn("meta_access_token", serialized)
+        self.assertNotIn("secret-token-value", serialized)
+        manifest = exported.json
+        manifest["workspace"] = {"id": 2, "name": "Imported settings"}
+        manifest["workspace_settings"]["id"] = 2
+        manifest["workspace_settings"].pop("workspace_id", None)
+        manifest["workspace_settings"]["meta_access_token"] = "secret-token-value"
+        with closing(connect()) as connection:
+            FinanceService(FinanceRepository(connection)).import_initial_manifest(2, manifest)
+        imported = self.request("GET", "/api/sbrocor/finance/v1/workspaces/2/export")
+        self.assertEqual(imported.json["workspace_settings"]["meta_ad_account_id"], "act_123")
+        self.assertNotIn("secret-token-value", imported.get_data(as_text=True))
+        self.assertNotIn("meta_access_token", imported.get_data(as_text=True))
+        with closing(connect()) as connection:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(workspace_settings)")}
+        self.assertNotIn("meta_access_token", columns)
+
+    def test_dashboard_excludes_unclassified_and_business_matches_moneylog(self):
+        self.create_workspace(1)
+        for item in (
+            {"id": "classified", "date": "2026-01-01", "merchant": "A", "amount": 100000, "category": "광고비"},
+            {"id": "unclassified", "date": "2026-01-01", "merchant": "B", "amount": 500000, "category": "미분류"},
+        ):
+            self.request("POST", "/api/sbrocor/finance/v1/transactions?workspace_id=1", item)
+        self.request("POST", "/api/sbrocor/finance/v1/products?workspace_id=1", {"id": 1, "name": "P", "cost_price": 1})
+        self.request("POST", "/api/sbrocor/finance/v1/platforms?workspace_id=1", {"id": 1, "name": "C", "commission_rate": 1})
+        sale = {"id": "sale", "date": "2026-01-01", "product_id": 1, "platform_id": 1, "selling_price": 1, "quantity": 1, "total_selling_amount": 900000, "total_cost_amount": 1, "commission_amount": 0, "net_profit": 700000}
+        self.request("POST", "/api/sbrocor/finance/v1/sales?workspace_id=1", sale)
+        dashboard = self.request("GET", "/api/sbrocor/finance/v1/dashboard?workspace_id=1").json
+        business = self.request("GET", "/api/sbrocor/finance/v1/business?workspace_id=1").json
+        self.assertEqual(dashboard["total_expenses"], 100000)
+        self.assertEqual(business["operating_profit"], 600000)
 
 
 if __name__ == "__main__":

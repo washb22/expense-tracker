@@ -39,6 +39,10 @@ class FinanceService:
             if int(sale["product_id"]) not in product_ids or int(sale["platform_id"]) not in platform_ids:
                 raise ValueError("sale references a product/platform outside the manifest workspace")
         counts = {key: len(manifest.get(key, [])) for key in ("transactions", "categories", "products", "platforms", "sales", "ads")}
-        if dry_run:
-            return {"dry_run": True, "counts": counts}
-        return {"dry_run": False, "counts": self.repository.replace_import(workspace_id, manifest)}
+        if not dry_run:
+            raise PermissionError("destructive import is disabled on the Finance API")
+        return {"dry_run": True, "counts": counts}
+
+    def import_initial_manifest(self, workspace_id: int, manifest: dict[str, Any]) -> dict[str, Any]:
+        self.import_manifest(workspace_id, manifest, dry_run=True)
+        return {"dry_run": False, "counts": self.repository.import_if_empty(workspace_id, manifest)}

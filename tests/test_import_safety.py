@@ -56,6 +56,30 @@ print('safe-import')
             self.assertIn("--confirm", result.stderr)
             self.assertFalse(database_path.exists())
 
+    def test_finance_init_requires_confirmation_and_refuses_existing_database(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            finance_path = Path(temp_dir) / "finance.db"
+            environment = os.environ.copy()
+            environment["SBROCOR_FINANCE_DB_PATH"] = str(finance_path)
+            environment["DATABASE_URL"] = f"sqlite:///{(Path(temp_dir) / 'legacy.db').as_posix()}"
+            unconfirmed = subprocess.run(
+                [sys.executable, "scripts/init_sbrocor_finance.py"],
+                cwd=PROJECT_ROOT, env=environment, text=True, capture_output=True, check=False,
+            )
+            self.assertNotEqual(unconfirmed.returncode, 0)
+            self.assertFalse(finance_path.exists())
+            confirmed = subprocess.run(
+                [sys.executable, "scripts/init_sbrocor_finance.py", "--confirm", "CREATE SBROCOR FINANCE DB"],
+                cwd=PROJECT_ROOT, env=environment, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(confirmed.returncode, 0, confirmed.stderr)
+            self.assertTrue(finance_path.exists())
+            second = subprocess.run(
+                [sys.executable, "scripts/init_sbrocor_finance.py", "--confirm", "CREATE SBROCOR FINANCE DB"],
+                cwd=PROJECT_ROOT, env=environment, text=True, capture_output=True, check=False,
+            )
+            self.assertNotEqual(second.returncode, 0)
+
     def test_guarded_online_backup_and_read_only_verification(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "source.db"

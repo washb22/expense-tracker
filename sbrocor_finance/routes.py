@@ -146,6 +146,8 @@ def export_workspace(workspace_id: int):
 def import_workspace(workspace_id: int):
     payload = _json_payload()
     dry_run = request.args.get("dry_run", "true").lower() != "false"
+    if not dry_run:
+        return jsonify(error="destructive_import_disabled"), 403
     with finance_connection() as connection:
         result = FinanceService(FinanceRepository(connection)).import_manifest(workspace_id, payload, dry_run)
         return jsonify(result)

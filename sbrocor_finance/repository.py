@@ -78,6 +78,13 @@ class FinanceRepository:
         return self.get_workspace(workspace_id)
 
     def delete_workspace(self, workspace_id: int) -> bool:
+        if any(self.counts(workspace_id).values()):
+            raise sqlite3.IntegrityError("workspace contains financial records")
+        settings = self.connection.execute(
+            "SELECT 1 FROM workspace_settings WHERE workspace_id=?", (workspace_id,)
+        ).fetchone()
+        if settings:
+            raise sqlite3.IntegrityError("workspace contains financial settings")
         cursor = self.connection.execute("DELETE FROM workspace WHERE id=?", (workspace_id,))
         self.connection.commit()
         return cursor.rowcount == 1
@@ -134,9 +141,16 @@ class FinanceRepository:
         self.connection.commit()
         return cursor.rowcount == 1
 
-    def replace_import(self, workspace_id: int, data: dict[str, Any]) -> dict[str, int]:
+    def import_if_empty(self, workspace_id: int, data: dict[str, Any]) -> dict[str, int]:
         if int(data["workspace"]["id"]) != workspace_id:
             raise ValueError("manifest workspace does not match URL workspace")
+        if any(self.counts(workspace_id).values()):
+            raise sqlite3.IntegrityError("destination workspace already contains financial data")
+        settings_exists = self.connection.execute(
+            "SELECT 1 FROM workspace_settings WHERE workspace_id=?", (workspace_id,)
+        ).fetchone()
+        if settings_exists:
+            raise sqlite3.IntegrityError("destination workspace already contains settings")
         counts: dict[str, int] = {}
         try:
             self.connection.execute("BEGIN IMMEDIATE")
@@ -144,19 +158,15 @@ class FinanceRepository:
                 "INSERT INTO workspace(id,name) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name",
                 (workspace_id, data["workspace"]["name"]),
             )
-            for resource in ("sales", "ads", "transactions", "categories", "products", "platforms"):
-                table = RESOURCE_CONFIG[resource]["table"]
-                self.connection.execute(f"DELETE FROM {table} WHERE workspace_id=?", (workspace_id,))
             for resource in ("transactions", "categories", "products", "platforms", "sales", "ads"):
                 for item in data.get(resource, []):
                     self.create_resource_uncommitted(resource, workspace_id, item)
                 counts[resource] = len(data.get(resource, []))
             settings = data.get("workspace_settings")
-            self.connection.execute("DELETE FROM workspace_settings WHERE workspace_id=?", (workspace_id,))
             if settings:
                 self.connection.execute(
-                    "INSERT INTO workspace_settings(id,workspace_id,currency,timezone,updated_at) VALUES (?,?,?,?,?)",
-                    (settings.get("id"), workspace_id, settings.get("currency", "KRW"), settings.get("timezone", "Asia/Seoul"), settings.get("updated_at")),
+                    "INSERT INTO workspace_settings(id,workspace_id,meta_ad_account_id,updated_at) VALUES (?,?,?,?)",
+                    (settings.get("id"), workspace_id, settings.get("meta_ad_account_id"), settings.get("updated_at")),
                 )
             self.connection.commit()
             return counts
@@ -194,7 +204,7 @@ class FinanceRepository:
 
     def dashboard(self, workspace_id: int) -> dict[str, Any]:
         expenses = self.connection.execute(
-            "SELECT COALESCE(SUM(amount),0) FROM finance_transaction WHERE workspace_id=?", (workspace_id,)
+            "SELECT COALESCE(SUM(amount),0) FROM finance_transaction WHERE workspace_id=? AND category <> '미분류'", (workspace_id,)
         ).fetchone()[0]
         sale_row = self.connection.execute(
             "SELECT COALESCE(SUM(total_selling_amount),0), COALESCE(SUM(net_profit),0) FROM sale WHERE workspace_id=?",

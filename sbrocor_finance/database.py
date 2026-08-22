@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS workspace (
 );
 CREATE TABLE IF NOT EXISTS finance_transaction (
     id TEXT PRIMARY KEY,
-    workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
+    workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE RESTRICT,
     date TEXT NOT NULL,
     merchant TEXT NOT NULL,
     amount INTEGER NOT NULL,
@@ -31,13 +31,13 @@ CREATE TABLE IF NOT EXISTS finance_transaction (
 );
 CREATE TABLE IF NOT EXISTS rule (
     id INTEGER PRIMARY KEY,
-    workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
+    workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE RESTRICT,
     keyword TEXT NOT NULL,
     category TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS product (
     id INTEGER PRIMARY KEY,
-    workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
+    workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE RESTRICT,
     name TEXT NOT NULL,
     sku TEXT,
     cost_price INTEGER NOT NULL,
@@ -46,17 +46,17 @@ CREATE TABLE IF NOT EXISTS product (
 );
 CREATE TABLE IF NOT EXISTS platform (
     id INTEGER PRIMARY KEY,
-    workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
+    workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE RESTRICT,
     name TEXT NOT NULL,
     commission_rate REAL NOT NULL,
     created_at TEXT
 );
 CREATE TABLE IF NOT EXISTS sale (
     id TEXT PRIMARY KEY,
-    workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
+    workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE RESTRICT,
     date TEXT NOT NULL,
-    product_id INTEGER NOT NULL REFERENCES product(id),
-    platform_id INTEGER NOT NULL REFERENCES platform(id),
+    product_id INTEGER NOT NULL REFERENCES product(id) ON DELETE RESTRICT,
+    platform_id INTEGER NOT NULL REFERENCES platform(id) ON DELETE RESTRICT,
     selling_price INTEGER NOT NULL,
     quantity INTEGER NOT NULL DEFAULT 1,
     total_selling_amount INTEGER NOT NULL,
@@ -67,14 +67,13 @@ CREATE TABLE IF NOT EXISTS sale (
 );
 CREATE TABLE IF NOT EXISTS workspace_settings (
     id INTEGER PRIMARY KEY,
-    workspace_id INTEGER NOT NULL UNIQUE REFERENCES workspace(id) ON DELETE CASCADE,
-    currency TEXT NOT NULL DEFAULT 'KRW',
-    timezone TEXT NOT NULL DEFAULT 'Asia/Seoul',
+    workspace_id INTEGER NOT NULL UNIQUE REFERENCES workspace(id) ON DELETE RESTRICT,
+    meta_ad_account_id TEXT,
     updated_at TEXT
 );
 CREATE TABLE IF NOT EXISTS ad_spend (
     id INTEGER PRIMARY KEY,
-    workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
+    workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE RESTRICT,
     date TEXT NOT NULL,
     platform TEXT NOT NULL DEFAULT 'meta',
     campaign_id TEXT,
