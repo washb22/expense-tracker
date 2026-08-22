@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+import math
 from typing import Any, Iterable
 
 
@@ -99,6 +100,64 @@ class FinanceRepository:
         return [dict(row) for row in self.connection.execute(
             f"SELECT * FROM {table} WHERE workspace_id=? ORDER BY id", (workspace_id,)
         )]
+
+    def available_months(self, workspace_id: int, resource: str) -> list[str]:
+        config = RESOURCE_CONFIG[resource]
+        if "date" not in config["fields"]:
+            return []
+        rows = self.connection.execute(
+            f"SELECT DISTINCT substr(date,1,7) month FROM {config['table']} "
+            "WHERE workspace_id=? AND date IS NOT NULL ORDER BY month DESC",
+            (workspace_id,),
+        )
+        return [row[0] for row in rows if row[0]]
+
+    def query_resource(
+        self, resource: str, workspace_id: int, *, page: int = 1, page_size: int = 50,
+        month: str | None = None, start_date: str | None = None, end_date: str | None = None,
+        search: str | None = None, filters: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        config = RESOURCE_CONFIG[resource]
+        table = config["table"]
+        clauses = ["workspace_id=?"]
+        params: list[Any] = [workspace_id]
+        if "date" in config["fields"]:
+            if month:
+                clauses.append("substr(date,1,7)=?")
+                params.append(month)
+            if start_date:
+                clauses.append("date>=?")
+                params.append(start_date)
+            if end_date:
+                clauses.append("date<=?")
+                params.append(end_date)
+        searchable = [field for field in ("merchant", "category", "keyword", "name", "sku", "campaign_name", "adset_name", "ad_name") if field in config["fields"]]
+        if search and searchable:
+            clauses.append("(" + " OR ".join(f"{field} LIKE ?" for field in searchable) + ")")
+            params.extend([f"%{search}%"] * len(searchable))
+        for field, value in (filters or {}).items():
+            if value not in (None, "") and field in config["fields"]:
+                clauses.append(f"{field}=?")
+                params.append(value)
+        where = " AND ".join(clauses)
+        total = int(self.connection.execute(f"SELECT COUNT(*) FROM {table} WHERE {where}", params).fetchone()[0])
+        page_size = max(1, min(int(page_size), 200))
+        page = max(1, int(page))
+        order = "date DESC, id DESC" if "date" in config["fields"] else "id DESC"
+        select = "*"
+        if resource == "products":
+            select = "product.*, (SELECT COUNT(*) FROM sale WHERE sale.workspace_id=product.workspace_id AND sale.product_id=product.id) sale_count"
+        elif resource == "platforms":
+            select = "platform.*, (SELECT COUNT(*) FROM sale WHERE sale.workspace_id=platform.workspace_id AND sale.platform_id=platform.id) sale_count"
+        rows = self.connection.execute(
+            f"SELECT {select} FROM {table} WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
+            [*params, page_size, (page - 1) * page_size],
+        )
+        return {
+            "items": [dict(row) for row in rows],
+            "pagination": {"page": page, "page_size": page_size, "total": total, "pages": math.ceil(total / page_size) if total else 0},
+            "available_months": self.available_months(workspace_id, resource),
+        }
 
     def get_resource(self, resource: str, workspace_id: int, item_id: str) -> dict[str, Any] | None:
         table = RESOURCE_CONFIG[resource]["table"]
@@ -207,9 +266,17 @@ class FinanceRepository:
             ).fetchone()[0]
         return result
 
-    def dashboard(self, workspace_id: int, month: str | None = None) -> dict[str, Any]:
-        date_clause = " AND substr(date,1,7)=?" if month else ""
-        params = (workspace_id, month) if month else (workspace_id,)
+    def dashboard(self, workspace_id: int, month: str | None = None, start_date: str | None = None, end_date: str | None = None) -> dict[str, Any]:
+        conditions: list[str] = []
+        values: list[Any] = [workspace_id]
+        if month:
+            conditions.append("substr(date,1,7)=?"); values.append(month)
+        if start_date:
+            conditions.append("date>=?"); values.append(start_date)
+        if end_date:
+            conditions.append("date<=?"); values.append(end_date)
+        date_clause = "".join(f" AND {condition}" for condition in conditions)
+        params = tuple(values)
         expenses = self.connection.execute(
             "SELECT COALESCE(SUM(amount),0) FROM finance_transaction WHERE workspace_id=? AND category <> '미분류'" + date_clause, params
         ).fetchone()[0]
@@ -220,6 +287,28 @@ class FinanceRepository:
         ad_spend = self.connection.execute(
             "SELECT COALESCE(SUM(spend),0) FROM ad_spend WHERE workspace_id=?" + date_clause, params
         ).fetchone()[0]
+        categories = [dict(row) for row in self.connection.execute(
+            "SELECT category, COUNT(*) count, COALESCE(SUM(amount),0) amount "
+            "FROM finance_transaction WHERE workspace_id=? AND category <> '미분류'" + date_clause +
+            " GROUP BY category ORDER BY amount DESC", params,
+        )]
+        merchants = [dict(row) for row in self.connection.execute(
+            "SELECT category, merchant, COUNT(*) count, COALESCE(SUM(amount),0) amount "
+            "FROM finance_transaction WHERE workspace_id=? AND category <> '미분류'" + date_clause +
+            " GROUP BY category, merchant ORDER BY amount DESC", params,
+        )]
+        detail_rows = [dict(row) for row in self.connection.execute(
+            "SELECT id,date,merchant,amount,category FROM finance_transaction WHERE workspace_id=? AND category <> '미분류'" + date_clause + " ORDER BY date DESC,id", params,
+        )]
+        daily_expenses = [dict(row) for row in self.connection.execute(
+            "SELECT date, COALESCE(SUM(amount),0) amount FROM finance_transaction "
+            "WHERE workspace_id=? AND category <> '미분류'" + date_clause + " GROUP BY date ORDER BY date", params,
+        )]
+        recent_sales = [dict(row) for row in self.connection.execute(
+            "SELECT s.*, p.name product_name, pl.name platform_name FROM sale s "
+            "JOIN product p ON p.id=s.product_id JOIN platform pl ON pl.id=s.platform_id "
+            "WHERE s.workspace_id=?" + date_clause.replace("date", "s.date") + " ORDER BY s.date DESC, s.id DESC LIMIT 10", params,
+        )]
         return {
             "workspace_id": workspace_id,
             "total_expenses": expenses,
@@ -227,6 +316,78 @@ class FinanceRepository:
             "total_net_profit": sale_row[1],
             "total_ad_spend": ad_spend,
             "month": month,
+            "available_months": sorted(set(self.available_months(workspace_id, "transactions") + self.available_months(workspace_id, "sales") + self.available_months(workspace_id, "ads")), reverse=True),
+            "categories": categories,
+            "merchants": merchants,
+            "transactions": detail_rows,
+            "daily_expenses": daily_expenses,
+            "recent_sales": recent_sales,
             "counts": self.counts(workspace_id),
         }
+
+    def business_analytics(self, workspace_id: int, month: str | None = None, start_date: str | None = None, end_date: str | None = None) -> dict[str, Any]:
+        result = self.dashboard(workspace_id, month, start_date, end_date)
+        conditions: list[str] = []
+        values: list[Any] = [workspace_id]
+        if month:
+            conditions.append("substr(s.date,1,7)=?"); values.append(month)
+        if start_date:
+            conditions.append("s.date>=?"); values.append(start_date)
+        if end_date:
+            conditions.append("s.date<=?"); values.append(end_date)
+        clause = "".join(f" AND {condition}" for condition in conditions)
+        params = tuple(values)
+        result["daily_sales"] = [dict(row) for row in self.connection.execute(
+            "SELECT s.date, SUM(s.total_selling_amount) sales, SUM(s.net_profit) net_profit, SUM(s.quantity) quantity "
+            "FROM sale s WHERE s.workspace_id=?" + clause + " GROUP BY s.date ORDER BY s.date", params,
+        )]
+        result["products"] = [dict(row) for row in self.connection.execute(
+            "SELECT p.id, p.name, COUNT(*) count, SUM(s.quantity) quantity, SUM(s.total_selling_amount) sales, SUM(s.net_profit) net_profit "
+            "FROM sale s JOIN product p ON p.id=s.product_id WHERE s.workspace_id=?" + clause +
+            " GROUP BY p.id,p.name ORDER BY sales DESC", params,
+        )]
+        result["platforms"] = [dict(row) for row in self.connection.execute(
+            "SELECT p.id, p.name, COUNT(*) count, SUM(s.quantity) quantity, SUM(s.total_selling_amount) sales, SUM(s.net_profit) net_profit "
+            "FROM sale s JOIN platform p ON p.id=s.platform_id WHERE s.workspace_id=?" + clause +
+            " GROUP BY p.id,p.name ORDER BY sales DESC", params,
+        )]
+        result["operating_profit"] = result["total_net_profit"] - result["total_expenses"]
+        result["operating_margin"] = (result["operating_profit"] / result["total_sales"] * 100) if result["total_sales"] else 0
+        return result
+
+    def ad_analytics(self, workspace_id: int, month: str | None = None, start_date: str | None = None, end_date: str | None = None) -> dict[str, Any]:
+        conditions: list[str] = []
+        values: list[Any] = [workspace_id]
+        if month:
+            conditions.append("substr(date,1,7)=?"); values.append(month)
+        if start_date:
+            conditions.append("date>=?"); values.append(start_date)
+        if end_date:
+            conditions.append("date<=?"); values.append(end_date)
+        clause = "".join(f" AND {condition}" for condition in conditions)
+        params = tuple(values)
+        summary = dict(self.connection.execute(
+            "SELECT COALESCE(SUM(spend),0) spend, COALESCE(SUM(impressions),0) impressions, "
+            "COALESCE(SUM(clicks),0) clicks, COALESCE(SUM(conversions),0) conversions, "
+            "COALESCE(SUM(conversion_value),0) conversion_value FROM ad_spend WHERE workspace_id=?" + clause, params,
+        ).fetchone())
+        summary["ctr"] = summary["clicks"] / summary["impressions"] * 100 if summary["impressions"] else 0
+        summary["cpc"] = summary["spend"] / summary["clicks"] if summary["clicks"] else 0
+        summary["roas"] = summary["conversion_value"] / summary["spend"] if summary["spend"] else 0
+        def grouped(columns: str) -> list[dict[str, Any]]:
+            rows = [dict(row) for row in self.connection.execute(
+                f"SELECT {columns}, SUM(spend) spend, SUM(impressions) impressions, SUM(clicks) clicks, "
+                "SUM(conversions) conversions, SUM(conversion_value) conversion_value "
+                "FROM ad_spend WHERE workspace_id=?" + clause + f" GROUP BY {columns} ORDER BY spend DESC", params,
+            )]
+            for row in rows:
+                row["ctr"] = row["clicks"] / row["impressions"] * 100 if row["impressions"] else 0
+                row["cpc"] = row["spend"] / row["clicks"] if row["clicks"] else 0
+                row["cpm"] = row["spend"] / row["impressions"] * 1000 if row["impressions"] else 0
+                row["cpa"] = row["spend"] / row["conversions"] if row["conversions"] else 0
+                row["roas"] = row["conversion_value"] / row["spend"] if row["spend"] else 0
+            return rows
+        daily = grouped("date"); campaigns = grouped("campaign_id,campaign_name"); adsets = grouped("campaign_id,adset_id,adset_name"); creatives = grouped("campaign_id,adset_id,ad_id,ad_name")
+        alerts = [{"level": "campaign", "id": row["campaign_id"], "name": row["campaign_name"], "spend": row["spend"], "reason": "전환 0건 · 중단 검토"} for row in campaigns if row["conversions"] == 0 and row["spend"] > 50000]
+        return {"summary": summary, "daily": daily, "campaigns": campaigns, "adsets": adsets, "creatives": creatives, "alerts": alerts, "available_months": self.available_months(workspace_id, "ads")}
 
