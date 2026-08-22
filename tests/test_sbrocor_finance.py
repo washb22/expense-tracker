@@ -289,6 +289,58 @@ class FinanceApiTest(unittest.TestCase):
         self.assertEqual(sum(item["amount"] for item in dashboard.json["categories"]), 1000)
         self.assertTrue(dashboard.json["merchants"])
 
+    def test_direct_date_range_filters_all_read_endpoints(self):
+        self.create_workspace(1)
+        for suffix, date_value, amount in (
+            ("jun", "2026-06-15", 100),
+            ("jul", "2026-07-10", 200),
+            ("aug", "2026-08-05", 300),
+        ):
+            self.request("POST", "/api/sbrocor/finance/v1/transactions?workspace_id=1", {
+                "id": f"transaction-{suffix}", "date": date_value, "merchant": suffix,
+                "amount": amount, "category": "광고비",
+            })
+
+        self.request("POST", "/api/sbrocor/finance/v1/products?workspace_id=1", {
+            "id": 1, "name": "기간 테스트 제품", "cost_price": 10,
+        })
+        self.request("POST", "/api/sbrocor/finance/v1/platforms?workspace_id=1", {
+            "id": 1, "name": "기간 테스트 채널", "commission_rate": 0,
+        })
+        for suffix, date_value, total in (
+            ("jun", "2026-06-15", 1000),
+            ("jul", "2026-07-10", 2000),
+            ("aug", "2026-08-05", 3000),
+        ):
+            ad_spend = {"jun": 100, "jul": 200, "aug": 300}[suffix]
+            self.request("POST", "/api/sbrocor/finance/v1/sales?workspace_id=1", {
+                "id": f"sale-{suffix}", "date": date_value, "product_id": 1, "platform_id": 1,
+                "selling_price": total, "quantity": 1, "total_selling_amount": total,
+                "total_cost_amount": 10, "commission_amount": 0, "net_profit": total - 10,
+            })
+            self.request("POST", "/api/sbrocor/finance/v1/ads?workspace_id=1", {
+                "id": {"jun": 1, "jul": 2, "aug": 3}[suffix], "date": date_value,
+                "campaign_id": "campaign", "campaign_name": "기간 테스트", "spend": ad_spend,
+                "impressions": ad_spend * 10, "clicks": ad_spend, "conversions": 1,
+                "conversion_value": total,
+            })
+
+        period = "workspace_id=1&start_date=2026-07-01&end_date=2026-07-31"
+        dashboard = self.request("GET", f"/api/sbrocor/finance/v1/dashboard?{period}")
+        business = self.request("GET", f"/api/sbrocor/finance/v1/business?{period}")
+        transactions = self.request("GET", f"/api/sbrocor/finance/v1/transactions?{period}")
+        sales = self.request("GET", f"/api/sbrocor/finance/v1/sales?{period}")
+        ads = self.request("GET", f"/api/sbrocor/finance/v1/ads/analytics?{period}")
+
+        for response in (dashboard, business, transactions, sales, ads):
+            self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        self.assertEqual(dashboard.json["total_expenses"], 200)
+        self.assertEqual(business.json["total_expenses"], 200)
+        self.assertEqual(business.json["total_sales"], 2000)
+        self.assertEqual([row["id"] for row in transactions.json["items"]], ["transaction-jul"])
+        self.assertEqual([row["id"] for row in sales.json["items"]], ["sale-jul"])
+        self.assertEqual(ads.json["summary"]["spend"], 200)
+
     def test_ad_hierarchy_analytics(self):
         self.create_workspace(1)
         self.request("POST", "/api/sbrocor/finance/v1/ads?workspace_id=1", {
