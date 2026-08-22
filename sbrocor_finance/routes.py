@@ -53,6 +53,22 @@ def _month() -> str | None:
     return value
 
 
+def _query_options(resource: str) -> dict:
+    filters = {}
+    for field in ("category", "product_id", "platform_id", "campaign_id", "adset_id"):
+        if request.args.get(field) not in (None, ""):
+            filters[field] = request.args[field]
+    return {
+        "page": request.args.get("page", 1, type=int),
+        "page_size": request.args.get("page_size", 50, type=int),
+        "month": _month(),
+        "start_date": request.args.get("start_date"),
+        "end_date": request.args.get("end_date"),
+        "search": request.args.get("search"),
+        "filters": filters,
+    }
+
+
 @finance_blueprint.errorhandler(ValueError)
 def _bad_request(error):
     return jsonify(error="invalid_request", detail=str(error)), 400
@@ -111,7 +127,7 @@ def dashboard():
     with finance_connection() as connection:
         repository = FinanceRepository(connection)
         FinanceService(repository).require_workspace(workspace_id)
-        return jsonify(repository.dashboard(workspace_id, _month()))
+        return jsonify(repository.dashboard(workspace_id, _month(), request.args.get("start_date"), request.args.get("end_date")))
 
 
 @finance_blueprint.get("/business")
@@ -122,9 +138,18 @@ def business():
     with finance_connection() as connection:
         repository = FinanceRepository(connection)
         FinanceService(repository).require_workspace(workspace_id)
-        dashboard_data = repository.dashboard(workspace_id, _month())
-        dashboard_data["operating_profit"] = dashboard_data["total_net_profit"] - dashboard_data["total_expenses"]
-        return jsonify(dashboard_data)
+        return jsonify(repository.business_analytics(workspace_id, _month(), request.args.get("start_date"), request.args.get("end_date")))
+
+
+@finance_blueprint.get("/ads/analytics")
+@require_server_hmac
+def ads_analytics():
+    workspace_id = _workspace_id()
+    _authorize("ads", workspace_id)
+    with finance_connection() as connection:
+        repository = FinanceRepository(connection)
+        FinanceService(repository).require_workspace(workspace_id)
+        return jsonify(repository.ad_analytics(workspace_id, _month(), request.args.get("start_date"), request.args.get("end_date")))
 
 
 def _resource_collection(resource: str):
@@ -135,7 +160,7 @@ def _resource_collection(resource: str):
         service = FinanceService(repository)
         service.require_workspace(workspace_id)
         if request.method == "GET":
-            return jsonify(items=repository.list_resource(resource, workspace_id, _month()))
+            return jsonify(repository.query_resource(resource, workspace_id, **_query_options(resource)))
         payload = _json_payload()
         return jsonify(service.create_resource(resource, workspace_id, payload)), 201
 

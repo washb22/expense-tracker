@@ -264,6 +264,40 @@ class FinanceApiTest(unittest.TestCase):
         self.assertEqual(dashboard["total_expenses"], 100000)
         self.assertEqual(business["operating_profit"], 600000)
 
+    def test_server_pagination_filters_and_analytics(self):
+        self.create_workspace(1)
+        for index in range(5):
+            self.request("POST", "/api/sbrocor/finance/v1/transactions?workspace_id=1", {
+                "id": f"t{index}", "date": f"2026-0{8 if index < 4 else 7}-0{index + 1}",
+                "merchant": "네이버" if index % 2 == 0 else "택배", "amount": 100 * (index + 1),
+                "category": "광고비" if index % 2 == 0 else "배송비",
+            })
+        page = self.request("GET", "/api/sbrocor/finance/v1/transactions?workspace_id=1&month=2026-08&page=1&page_size=2")
+        self.assertEqual(page.status_code, 200)
+        self.assertEqual(len(page.json["items"]), 2)
+        self.assertEqual(page.json["pagination"]["total"], 4)
+        self.assertEqual(page.json["pagination"]["pages"], 2)
+        self.assertEqual(page.json["available_months"], ["2026-08", "2026-07"])
+        searched = self.request("GET", "/api/sbrocor/finance/v1/transactions?workspace_id=1&search=네이버")
+        self.assertEqual(searched.json["pagination"]["total"], 3)
+        dashboard = self.request("GET", "/api/sbrocor/finance/v1/dashboard?workspace_id=1&month=2026-08")
+        self.assertEqual(sum(item["amount"] for item in dashboard.json["categories"]), 1000)
+        self.assertTrue(dashboard.json["merchants"])
+
+    def test_ad_hierarchy_analytics(self):
+        self.create_workspace(1)
+        self.request("POST", "/api/sbrocor/finance/v1/ads?workspace_id=1", {
+            "id": 1, "date": "2026-08-01", "campaign_id": "c1", "campaign_name": "캠페인",
+            "adset_id": "set1", "adset_name": "세트", "ad_id": "ad1", "ad_name": "소재",
+            "spend": 100, "impressions": 1000, "clicks": 20, "conversions": 2, "conversion_value": 400,
+        })
+        response = self.request("GET", "/api/sbrocor/finance/v1/ads/analytics?workspace_id=1&month=2026-08")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["summary"]["roas"], 4)
+        self.assertEqual(response.json["campaigns"][0]["campaign_name"], "캠페인")
+        self.assertEqual(response.json["adsets"][0]["adset_name"], "세트")
+        self.assertEqual(response.json["creatives"][0]["ad_name"], "소재")
+
 
 if __name__ == "__main__":
     unittest.main()
