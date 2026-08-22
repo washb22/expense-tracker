@@ -144,8 +144,13 @@ class FinanceRepository:
         page_size = max(1, min(int(page_size), 200))
         page = max(1, int(page))
         order = "date DESC, id DESC" if "date" in config["fields"] else "id DESC"
+        select = "*"
+        if resource == "products":
+            select = "product.*, (SELECT COUNT(*) FROM sale WHERE sale.workspace_id=product.workspace_id AND sale.product_id=product.id) sale_count"
+        elif resource == "platforms":
+            select = "platform.*, (SELECT COUNT(*) FROM sale WHERE sale.workspace_id=platform.workspace_id AND sale.platform_id=platform.id) sale_count"
         rows = self.connection.execute(
-            f"SELECT * FROM {table} WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
+            f"SELECT {select} FROM {table} WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
             [*params, page_size, (page - 1) * page_size],
         )
         return {
@@ -292,6 +297,9 @@ class FinanceRepository:
             "FROM finance_transaction WHERE workspace_id=? AND category <> '미분류'" + date_clause +
             " GROUP BY category, merchant ORDER BY amount DESC", params,
         )]
+        detail_rows = [dict(row) for row in self.connection.execute(
+            "SELECT id,date,merchant,amount,category FROM finance_transaction WHERE workspace_id=? AND category <> '미분류'" + date_clause + " ORDER BY date DESC,id", params,
+        )]
         daily_expenses = [dict(row) for row in self.connection.execute(
             "SELECT date, COALESCE(SUM(amount),0) amount FROM finance_transaction "
             "WHERE workspace_id=? AND category <> '미분류'" + date_clause + " GROUP BY date ORDER BY date", params,
@@ -311,6 +319,7 @@ class FinanceRepository:
             "available_months": sorted(set(self.available_months(workspace_id, "transactions") + self.available_months(workspace_id, "sales") + self.available_months(workspace_id, "ads")), reverse=True),
             "categories": categories,
             "merchants": merchants,
+            "transactions": detail_rows,
             "daily_expenses": daily_expenses,
             "recent_sales": recent_sales,
             "counts": self.counts(workspace_id),
@@ -366,10 +375,19 @@ class FinanceRepository:
         summary["cpc"] = summary["spend"] / summary["clicks"] if summary["clicks"] else 0
         summary["roas"] = summary["conversion_value"] / summary["spend"] if summary["spend"] else 0
         def grouped(columns: str) -> list[dict[str, Any]]:
-            return [dict(row) for row in self.connection.execute(
+            rows = [dict(row) for row in self.connection.execute(
                 f"SELECT {columns}, SUM(spend) spend, SUM(impressions) impressions, SUM(clicks) clicks, "
                 "SUM(conversions) conversions, SUM(conversion_value) conversion_value "
                 "FROM ad_spend WHERE workspace_id=?" + clause + f" GROUP BY {columns} ORDER BY spend DESC", params,
             )]
-        return {"summary": summary, "daily": grouped("date"), "campaigns": grouped("campaign_id,campaign_name"), "adsets": grouped("campaign_id,adset_id,adset_name"), "creatives": grouped("campaign_id,adset_id,ad_id,ad_name"), "available_months": self.available_months(workspace_id, "ads")}
+            for row in rows:
+                row["ctr"] = row["clicks"] / row["impressions"] * 100 if row["impressions"] else 0
+                row["cpc"] = row["spend"] / row["clicks"] if row["clicks"] else 0
+                row["cpm"] = row["spend"] / row["impressions"] * 1000 if row["impressions"] else 0
+                row["cpa"] = row["spend"] / row["conversions"] if row["conversions"] else 0
+                row["roas"] = row["conversion_value"] / row["spend"] if row["spend"] else 0
+            return rows
+        daily = grouped("date"); campaigns = grouped("campaign_id,campaign_name"); adsets = grouped("campaign_id,adset_id,adset_name"); creatives = grouped("campaign_id,adset_id,ad_id,ad_name")
+        alerts = [{"level": "campaign", "id": row["campaign_id"], "name": row["campaign_name"], "spend": row["spend"], "reason": "전환 0건 · 중단 검토"} for row in campaigns if row["conversions"] == 0 and row["spend"] > 50000]
+        return {"summary": summary, "daily": daily, "campaigns": campaigns, "adsets": adsets, "creatives": creatives, "alerts": alerts, "available_months": self.available_months(workspace_id, "ads")}
 

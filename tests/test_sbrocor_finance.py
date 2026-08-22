@@ -74,6 +74,11 @@ class FinanceApiTest(unittest.TestCase):
             headers=self.headers(method, path, body, nonce=nonce, timestamp=timestamp, context=context),
         )
 
+    def request_bytes(self, method, path, body, content_type, context=None):
+        headers = self.headers(method, path, body, context=context)
+        headers["Content-Type"] = content_type
+        return self.client.open(path, method=method, data=body, headers=headers)
+
     def create_workspace(self, workspace_id, name="Workspace"):
         response = self.request("POST", "/api/sbrocor/finance/v1/workspaces", {"id": workspace_id, "name": name})
         self.assertEqual(response.status_code, 201, response.get_data(as_text=True))
@@ -297,6 +302,75 @@ class FinanceApiTest(unittest.TestCase):
         self.assertEqual(response.json["campaigns"][0]["campaign_name"], "캠페인")
         self.assertEqual(response.json["adsets"][0]["adset_name"], "세트")
         self.assertEqual(response.json["creatives"][0]["ad_name"], "소재")
+
+    def test_dashboard_drilldown_excel_and_bulk_delete(self):
+        self.create_workspace(1)
+        for item in (
+            {"id": "t1", "date": "2026-08-01", "merchant": "택배사", "amount": 100, "category": "배송비"},
+            {"id": "t2", "date": "2026-08-02", "merchant": "택배사", "amount": 200, "category": "배송비"},
+        ):
+            self.request("POST", "/api/sbrocor/finance/v1/transactions?workspace_id=1", item)
+        dashboard = self.request("GET", "/api/sbrocor/finance/v1/dashboard?workspace_id=1&month=2026-08")
+        self.assertEqual([row["id"] for row in dashboard.json["transactions"]], ["t2", "t1"])
+        exported = self.request("GET", "/api/sbrocor/finance/v1/exports/expenses?workspace_id=1&month=2026-08")
+        self.assertEqual(exported.status_code, 200)
+        self.assertTrue(exported.data.startswith(b"PK"))
+        deleted = self.request("POST", "/api/sbrocor/finance/v1/transactions/bulk-delete?workspace_id=1", {"ids": ["t1", "t2"]})
+        self.assertEqual(deleted.json["deleted"], 2)
+
+    def test_rule_reclassification_and_product_recalculation_are_confirmed(self):
+        self.create_workspace(1)
+        self.request("POST", "/api/sbrocor/finance/v1/categories?workspace_id=1", {"id": 1, "keyword": "택배", "category": "배송비"})
+        self.request("POST", "/api/sbrocor/finance/v1/transactions?workspace_id=1", {"id": "t1", "date": "2026-08-01", "merchant": "대한택배", "amount": 100, "category": "미분류"})
+        preview = self.request("POST", "/api/sbrocor/finance/v1/categories/reclassify?workspace_id=1", {"apply": False})
+        self.assertEqual(preview.json["changed"], 1)
+        self.assertEqual(self.request("POST", "/api/sbrocor/finance/v1/categories/reclassify?workspace_id=1", {"apply": True}).status_code, 400)
+        applied = self.request("POST", "/api/sbrocor/finance/v1/categories/reclassify?workspace_id=1", {"apply": True, "confirmation": "RECLASSIFY ALL"})
+        self.assertEqual(applied.json["changed"], 1)
+
+        self.request("POST", "/api/sbrocor/finance/v1/products?workspace_id=1", {"id": 1, "name": "P", "cost_price": 400})
+        self.request("POST", "/api/sbrocor/finance/v1/platforms?workspace_id=1", {"id": 1, "name": "C", "commission_rate": 10})
+        sale = {"id": "s1", "date": "2026-08-01", "product_id": 1, "platform_id": 1, "selling_price": 1000, "quantity": 2, "total_selling_amount": 1000, "total_cost_amount": 100, "commission_amount": 100, "net_profit": 800}
+        self.request("POST", "/api/sbrocor/finance/v1/sales?workspace_id=1", sale)
+        impact = self.request("POST", "/api/sbrocor/finance/v1/products/1/recalculate?workspace_id=1", {"apply": False})
+        self.assertEqual(impact.json["affected"], 1)
+        self.assertEqual(self.request("POST", "/api/sbrocor/finance/v1/products/1/recalculate?workspace_id=1", {"apply": True}).status_code, 400)
+
+    def test_transaction_import_dry_run_and_replace_confirmation(self):
+        self.create_workspace(1)
+        self.request("POST", "/api/sbrocor/finance/v1/categories?workspace_id=1", {"id": 1, "keyword": "택배", "category": "배송비"})
+        boundary = "----financefixture"
+        csv = "날짜,거래처명,금액\r\n2026-08-01,대한택배,1200\r\n"
+        def multipart(dry_run, confirmation=None):
+            fields = [("mode", "replace"), ("dry_run", str(dry_run).lower())]
+            if confirmation: fields.append(("confirmation", confirmation))
+            parts = []
+            for name, value in fields:
+                parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n")
+            parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"transactions.csv\"\r\nContent-Type: text/csv\r\n\r\n{csv}\r\n--{boundary}--\r\n")
+            return "".join(parts).encode("utf-8")
+        content_type = f"multipart/form-data; boundary={boundary}"
+        preview = self.request_bytes("POST", "/api/sbrocor/finance/v1/transactions/import?workspace_id=1", multipart(True), content_type)
+        self.assertEqual(preview.status_code, 200, preview.get_data(as_text=True))
+        self.assertEqual(preview.json["add"], 1)
+        blocked = self.request_bytes("POST", "/api/sbrocor/finance/v1/transactions/import?workspace_id=1", multipart(False), content_type)
+        self.assertEqual(blocked.status_code, 400)
+        applied = self.request_bytes("POST", "/api/sbrocor/finance/v1/transactions/import?workspace_id=1", multipart(False, "REPLACE TRANSACTIONS"), content_type)
+        self.assertEqual(applied.status_code, 200, applied.get_data(as_text=True))
+        imported = self.request("GET", "/api/sbrocor/finance/v1/transactions?workspace_id=1")
+        self.assertEqual(imported.json["items"][0]["category"], "배송비")
+
+    def test_meta_settings_never_persist_or_return_token(self):
+        self.create_workspace(1)
+        with patch.dict(os.environ, {"SBROCOR_META_ACCESS_TOKEN_WORKSPACE_1": "server-only-token"}, clear=False):
+            saved = self.request("PATCH", "/api/sbrocor/finance/v1/meta/settings?workspace_id=1", {"meta_ad_account_id": "act_fixture", "meta_access_token": "must-ignore"})
+            self.assertEqual(saved.json["meta_ad_account_id"], "act_fixture")
+            self.assertTrue(saved.json["token_configured"])
+            self.assertNotIn("server-only-token", saved.get_data(as_text=True))
+            self.assertNotIn("must-ignore", saved.get_data(as_text=True))
+        with closing(connect()) as connection:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(workspace_settings)")}
+        self.assertNotIn("meta_access_token", columns)
 
 
 if __name__ == "__main__":
