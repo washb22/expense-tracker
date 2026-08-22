@@ -2,7 +2,7 @@ name: MoneyLog safety refactor
 
 on:
   push:
-    branches: [moneylog-safe-refactor]
+    branches: [moneylog-safe-refactor, sbrocor-finance-api]
   pull_request:
     branches: [main]
 
@@ -18,7 +18,7 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
       - run: python -m unittest discover -s tests -v
-      - run: python -m py_compile app.py db_init.py moneylog_maintenance/migrations.py scripts/*.py
+      - run: python -m py_compile app.py db_init.py moneylog_maintenance/migrations.py sbrocor_finance/*.py scripts/*.py
       - run: bash -n scripts/start_production.sh tests/test_start_production.sh
       - name: Exercise production process topology
         run: bash tests/test_start_production.sh

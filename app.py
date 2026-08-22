@@ -39,6 +39,11 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['GOOGLE_CLIENT_ID'] = os.getenv('GOOGLE_CLIENT_ID')
 app.config['GOOGLE_CLIENT_SECRET'] = os.getenv('GOOGLE_CLIENT_SECRET')
 
+# Isolated server-to-server API. Importing/registering it does not open or create
+# either SQLite database; Finance initialization remains an explicit operation.
+from sbrocor_finance import finance_blueprint
+app.register_blueprint(finance_blueprint)
+
 db = SQLAlchemy(app)
 login_manager = LoginManager()
 login_manager.init_app(app)
