@@ -293,7 +293,7 @@ class FinanceApiTest(unittest.TestCase):
         self.create_workspace(1)
         for suffix, date_value, amount in (
             ("jun", "2026-06-15", 100),
-            ("jul", "2026-07-10", 200),
+            ("jul", "2026-07-31 12:30:00", 200),
             ("aug", "2026-08-05", 300),
         ):
             self.request("POST", "/api/sbrocor/finance/v1/transactions?workspace_id=1", {
@@ -309,7 +309,7 @@ class FinanceApiTest(unittest.TestCase):
         })
         for suffix, date_value, total in (
             ("jun", "2026-06-15", 1000),
-            ("jul", "2026-07-10", 2000),
+            ("jul", "2026-07-31 12:30:00", 2000),
             ("aug", "2026-08-05", 3000),
         ):
             ad_spend = {"jun": 100, "jul": 200, "aug": 300}[suffix]

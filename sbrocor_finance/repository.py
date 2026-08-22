@@ -126,10 +126,10 @@ class FinanceRepository:
                 clauses.append("substr(date,1,7)=?")
                 params.append(month)
             if start_date:
-                clauses.append("date>=?")
+                clauses.append("substr(date,1,10)>=?")
                 params.append(start_date)
             if end_date:
-                clauses.append("date<=?")
+                clauses.append("substr(date,1,10)<=?")
                 params.append(end_date)
         searchable = [field for field in ("merchant", "category", "keyword", "name", "sku", "campaign_name", "adset_name", "ad_name") if field in config["fields"]]
         if search and searchable:
@@ -272,9 +272,9 @@ class FinanceRepository:
         if month:
             conditions.append("substr(date,1,7)=?"); values.append(month)
         if start_date:
-            conditions.append("date>=?"); values.append(start_date)
+            conditions.append("substr(date,1,10)>=?"); values.append(start_date)
         if end_date:
-            conditions.append("date<=?"); values.append(end_date)
+            conditions.append("substr(date,1,10)<=?"); values.append(end_date)
         date_clause = "".join(f" AND {condition}" for condition in conditions)
         params = tuple(values)
         expenses = self.connection.execute(
@@ -332,9 +332,9 @@ class FinanceRepository:
         if month:
             conditions.append("substr(s.date,1,7)=?"); values.append(month)
         if start_date:
-            conditions.append("s.date>=?"); values.append(start_date)
+            conditions.append("substr(s.date,1,10)>=?"); values.append(start_date)
         if end_date:
-            conditions.append("s.date<=?"); values.append(end_date)
+            conditions.append("substr(s.date,1,10)<=?"); values.append(end_date)
         clause = "".join(f" AND {condition}" for condition in conditions)
         params = tuple(values)
         result["daily_sales"] = [dict(row) for row in self.connection.execute(
@@ -361,9 +361,9 @@ class FinanceRepository:
         if month:
             conditions.append("substr(date,1,7)=?"); values.append(month)
         if start_date:
-            conditions.append("date>=?"); values.append(start_date)
+            conditions.append("substr(date,1,10)>=?"); values.append(start_date)
         if end_date:
-            conditions.append("date<=?"); values.append(end_date)
+            conditions.append("substr(date,1,10)<=?"); values.append(end_date)
         clause = "".join(f" AND {condition}" for condition in conditions)
         params = tuple(values)
         summary = dict(self.connection.execute(
