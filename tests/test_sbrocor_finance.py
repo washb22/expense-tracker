@@ -11,6 +11,7 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
+import requests
 from flask import Flask
 
 from sbrocor_finance import finance_blueprint
@@ -1008,6 +1009,129 @@ class FinanceApiTest(unittest.TestCase):
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM marketing_spend").fetchone()[0], 1)
             self.assertEqual(connection.execute("SELECT SUM(amount_krw) FROM marketing_spend").fetchone()[0], 300000)
 
+    def test_meta_json_error_is_structured_and_credentials_are_never_in_url_or_logs(self):
+        self.create_workspace(1)
+        brand = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "오류 브랜드"}).json
+        fake_token = "fake-production-shaped-token-never-use-real-values"
+        with patch.dict(os.environ, {"SBROCOR_META_ACCESS_TOKEN_ERROR": fake_token}, clear=False):
+            account = self.request("POST", "/api/sbrocor/finance/v1/ad-accounts?workspace_id=1", {
+                "brand_id": brand["id"], "platform": "meta", "account_id": "act_error",
+                "account_name": "오류 계정", "currency": "KRW", "credential_key": "ERROR",
+            }).json
+
+            class ErrorResponse:
+                status_code = 400
+                def json(self):
+                    return {"error": {
+                        "message": "Unsupported get request",
+                        "type": "GraphMethodException", "code": 100, "error_subcode": 33,
+                    }}
+
+            calls = []
+            def fake_get(url, **kwargs):
+                calls.append((url, kwargs))
+                return ErrorResponse()
+
+            with self.assertLogs("sbrocor_finance.routes", level="WARNING") as captured:
+                with patch("sbrocor_finance.routes.requests.get", side_effect=fake_get):
+                    response = self.request(
+                        "POST", f"/api/sbrocor/finance/v1/ad-accounts/{account['id']}/sync?workspace_id=1",
+                        {"start_date": "2026-08-01", "end_date": "2026-08-01"},
+                    )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json, {
+            "error": "meta_api_error", "detail": "Meta API: Unsupported get request",
+            "meta_code": 100, "meta_subcode": 33,
+        })
+        self.assertEqual(len(calls), 1)
+        requested_url, requested = calls[0]
+        self.assertNotIn("access_token", requested_url.lower())
+        self.assertNotIn("access_token", (requested.get("params") or {}))
+        self.assertEqual(requested["headers"], {"Authorization": f"Bearer {fake_token}"})
+        self.assertNotIn(fake_token, "\n".join(captured.output))
+        self.assertNotIn(fake_token, response.get_data(as_text=True))
+        with closing(connect()) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM ad_spend").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM marketing_spend").fetchone()[0], 0)
+            self.assertIsNone(connection.execute(
+                "SELECT last_synced_at FROM ad_account_connection WHERE id=?", (account["id"],)
+            ).fetchone()[0])
+
+    def test_meta_paging_token_is_removed_and_middle_page_error_is_safe(self):
+        self.create_workspace(1)
+        brand = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "페이지 오류"}).json
+        fake_token = "fake-paging-token-never-use-real-values"
+        with patch.dict(os.environ, {"SBROCOR_META_ACCESS_TOKEN_PAGEERROR": fake_token}, clear=False):
+            account = self.request("POST", "/api/sbrocor/finance/v1/ad-accounts?workspace_id=1", {
+                "brand_id": brand["id"], "platform": "meta", "account_id": "act_page_error",
+                "account_name": "페이지 오류", "currency": "KRW", "credential_key": "PAGEERROR",
+            }).json
+
+            class FirstPage:
+                status_code = 200
+                def json(self):
+                    return {
+                        "data": [{"date_start": "2026-08-01", "ad_id": "partial", "spend": "100000"}],
+                        "paging": {"next": f"https://meta.example/fail?after=cursor&access_token={fake_token}"},
+                    }
+
+            calls = []
+            def fake_get(url, **kwargs):
+                calls.append((url, kwargs))
+                if len(calls) == 2:
+                    raise requests.ConnectionError("simulated safe network failure")
+                return FirstPage()
+
+            with self.assertLogs("sbrocor_finance.routes", level="WARNING") as captured:
+                with patch("sbrocor_finance.routes.requests.get", side_effect=fake_get):
+                    response = self.request(
+                        "POST", f"/api/sbrocor/finance/v1/ad-accounts/{account['id']}/sync?workspace_id=1",
+                        {"start_date": "2026-08-01", "end_date": "2026-08-01"},
+                    )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json, {"error": "meta_api_error", "detail": "Meta API 요청에 실패했습니다."})
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("access_token", calls[1][0].lower())
+        self.assertEqual(calls[1][1]["headers"], {"Authorization": f"Bearer {fake_token}"})
+        self.assertNotIn(fake_token, "\n".join(captured.output))
+        with closing(connect()) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM ad_spend").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM marketing_spend").fetchone()[0], 0)
+            self.assertIsNone(connection.execute(
+                "SELECT last_synced_at FROM ad_account_connection WHERE id=?", (account["id"],)
+            ).fetchone()[0])
+
+    def test_meta_non_json_and_timeout_errors_are_safe(self):
+        self.create_workspace(1)
+        brand = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "안전 오류"}).json
+        fake_token = "fake-safe-error-token-never-use-real-values"
+        with patch.dict(os.environ, {"SBROCOR_META_ACCESS_TOKEN_SAFEERROR": fake_token}, clear=False):
+            account = self.request("POST", "/api/sbrocor/finance/v1/ad-accounts?workspace_id=1", {
+                "brand_id": brand["id"], "platform": "meta", "account_id": "act_safe_error",
+                "account_name": "안전 오류", "currency": "KRW", "credential_key": "SAFEERROR",
+            }).json
+            path = f"/api/sbrocor/finance/v1/ad-accounts/{account['id']}/sync?workspace_id=1"
+            payload = {"start_date": "2026-08-01", "end_date": "2026-08-01"}
+
+            class NonJsonResponse:
+                status_code = 503
+                def json(self): raise ValueError("not json")
+
+            with self.assertLogs("sbrocor_finance.routes", level="WARNING") as non_json_logs:
+                with patch("sbrocor_finance.routes.requests.get", return_value=NonJsonResponse()):
+                    non_json = self.request("POST", path, payload)
+            with self.assertLogs("sbrocor_finance.routes", level="WARNING") as timeout_logs:
+                with patch("sbrocor_finance.routes.requests.get", side_effect=requests.Timeout("do not expose request")):
+                    timeout = self.request("POST", path, payload)
+
+        for response in (non_json, timeout):
+            self.assertEqual(response.status_code, 502)
+            self.assertEqual(response.json, {"error": "meta_api_error", "detail": "Meta API 요청에 실패했습니다."})
+            self.assertNotIn(fake_token, response.get_data(as_text=True))
+        self.assertNotIn(fake_token, "\n".join(non_json_logs.output + timeout_logs.output))
+
     def test_meta_sync_page_failure_does_not_record_partial_completion(self):
         self.create_workspace(1)
         brand = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "실패 브랜드"}).json
@@ -1021,11 +1145,11 @@ class FinanceApiTest(unittest.TestCase):
                 def json(self): return {"data": [{"date_start": "2026-08-01", "ad_id": "partial", "spend": "100000"}], "paging": {"next": "https://meta.example/fail"}}
             def fake_get(url, **_kwargs):
                 if url == "https://meta.example/fail":
-                    raise RuntimeError("simulated page failure")
+                    raise requests.ConnectionError("simulated page failure")
                 return FirstPage()
             with patch("sbrocor_finance.routes.requests.get", side_effect=fake_get):
-                with self.assertRaisesRegex(RuntimeError, "simulated page failure"):
-                    self.request("POST", f"/api/sbrocor/finance/v1/ad-accounts/{account['id']}/sync?workspace_id=1", {"start_date": "2026-08-01", "end_date": "2026-08-01"})
+                response = self.request("POST", f"/api/sbrocor/finance/v1/ad-accounts/{account['id']}/sync?workspace_id=1", {"start_date": "2026-08-01", "end_date": "2026-08-01"})
+                self.assertEqual(response.status_code, 502)
         with closing(connect()) as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM ad_spend").fetchone()[0], 0)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM marketing_spend").fetchone()[0], 0)
