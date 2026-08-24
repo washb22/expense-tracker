@@ -83,6 +83,20 @@ class FinanceApiTest(unittest.TestCase):
         response = self.request("POST", "/api/sbrocor/finance/v1/workspaces", {"id": workspace_id, "name": name})
         self.assertEqual(response.status_code, 201, response.get_data(as_text=True))
 
+    def multipart_import(self, filename, content, mode, dry_run, confirmation=None):
+        boundary = f"----financefixture{uuid.uuid4().hex}"
+        fields = [("mode", mode), ("dry_run", str(dry_run).lower())]
+        if confirmation:
+            fields.append(("confirmation", confirmation))
+        parts = []
+        for name, value in fields:
+            parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n")
+        parts.append(
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n"
+            f"Content-Type: text/csv\r\n\r\n{content}\r\n--{boundary}--\r\n"
+        )
+        return "".join(parts).encode("utf-8"), f"multipart/form-data; boundary={boundary}"
+
     def test_schema_pragmas_and_foreign_keys(self):
         connection = connect()
         self.assertEqual(connection.execute("PRAGMA foreign_keys").fetchone()[0], 1)
@@ -388,29 +402,93 @@ class FinanceApiTest(unittest.TestCase):
         self.assertEqual(impact.json["affected"], 1)
         self.assertEqual(self.request("POST", "/api/sbrocor/finance/v1/products/1/recalculate?workspace_id=1", {"apply": True}).status_code, 400)
 
-    def test_transaction_import_dry_run_and_replace_confirmation(self):
+    def test_transaction_import_append_replace_and_admin_safety(self):
         self.create_workspace(1)
         self.request("POST", "/api/sbrocor/finance/v1/categories?workspace_id=1", {"id": 1, "keyword": "택배", "category": "배송비"})
-        boundary = "----financefixture"
+        self.request("POST", "/api/sbrocor/finance/v1/transactions?workspace_id=1", {
+            "id": "existing", "date": "2026-07-31", "merchant": "기존 거래", "amount": 500, "category": "기타",
+        })
         csv = "날짜,거래처명,금액\r\n2026-08-01,대한택배,1200\r\n"
-        def multipart(dry_run, confirmation=None):
-            fields = [("mode", "replace"), ("dry_run", str(dry_run).lower())]
-            if confirmation: fields.append(("confirmation", confirmation))
-            parts = []
-            for name, value in fields:
-                parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n")
-            parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"transactions.csv\"\r\nContent-Type: text/csv\r\n\r\n{csv}\r\n--{boundary}--\r\n")
-            return "".join(parts).encode("utf-8")
-        content_type = f"multipart/form-data; boundary={boundary}"
-        preview = self.request_bytes("POST", "/api/sbrocor/finance/v1/transactions/import?workspace_id=1", multipart(True), content_type)
+        path = "/api/sbrocor/finance/v1/transactions/import?workspace_id=1"
+
+        body, content_type = self.multipart_import("transactions.csv", csv, "append", True)
+        preview = self.request_bytes("POST", path, body, content_type)
         self.assertEqual(preview.status_code, 200, preview.get_data(as_text=True))
+        self.assertEqual(preview.json["existing"], 1)
         self.assertEqual(preview.json["add"], 1)
-        blocked = self.request_bytes("POST", "/api/sbrocor/finance/v1/transactions/import?workspace_id=1", multipart(False), content_type)
+        self.assertEqual(len(self.request("GET", "/api/sbrocor/finance/v1/transactions?workspace_id=1").json["items"]), 1)
+
+        body, content_type = self.multipart_import("transactions.csv", csv, "append", False)
+        applied_append = self.request_bytes("POST", path, body, content_type)
+        self.assertEqual(applied_append.status_code, 200, applied_append.get_data(as_text=True))
+        self.assertEqual(len(self.request("GET", "/api/sbrocor/finance/v1/transactions?workspace_id=1").json["items"]), 2)
+
+        employee = {"actor_uid": "employee", "role": "employee", "workspace_ids": [1], "permissions": ["transactions"]}
+        body, content_type = self.multipart_import("transactions.csv", csv, "replace", True)
+        denied = self.request_bytes("POST", path, body, content_type, context=employee)
+        self.assertEqual(denied.status_code, 403)
+
+        body, content_type = self.multipart_import("transactions.csv", csv, "replace", True)
+        replace_preview = self.request_bytes("POST", path, body, content_type)
+        self.assertEqual(replace_preview.status_code, 200, replace_preview.get_data(as_text=True))
+        self.assertEqual((replace_preview.json["existing"], replace_preview.json["delete"], replace_preview.json["add"]), (2, 2, 1))
+
+        body, content_type = self.multipart_import("transactions.csv", csv, "replace", False)
+        blocked = self.request_bytes("POST", path, body, content_type)
         self.assertEqual(blocked.status_code, 400)
-        applied = self.request_bytes("POST", "/api/sbrocor/finance/v1/transactions/import?workspace_id=1", multipart(False, "REPLACE TRANSACTIONS"), content_type)
+        self.assertEqual(len(self.request("GET", "/api/sbrocor/finance/v1/transactions?workspace_id=1").json["items"]), 2)
+
+        body, content_type = self.multipart_import("transactions.csv", csv, "replace", False, "REPLACE TRANSACTIONS")
+        applied = self.request_bytes("POST", path, body, content_type)
         self.assertEqual(applied.status_code, 200, applied.get_data(as_text=True))
         imported = self.request("GET", "/api/sbrocor/finance/v1/transactions?workspace_id=1")
+        self.assertEqual(len(imported.json["items"]), 1)
         self.assertEqual(imported.json["items"][0]["category"], "배송비")
+
+    def test_sale_import_append_replace_and_admin_safety(self):
+        self.create_workspace(1)
+        self.request("POST", "/api/sbrocor/finance/v1/products?workspace_id=1", {"id": 1, "name": "제품", "cost_price": 400})
+        self.request("POST", "/api/sbrocor/finance/v1/platforms?workspace_id=1", {"id": 1, "name": "채널", "commission_rate": 10})
+        self.request("POST", "/api/sbrocor/finance/v1/sales?workspace_id=1", {
+            "id": "existing", "date": "2026-07-31", "product_id": 1, "platform_id": 1,
+            "selling_price": 1000, "quantity": 1, "total_selling_amount": 1000,
+            "total_cost_amount": 400, "commission_amount": 100, "net_profit": 500,
+        })
+        csv = "판매일,제품명,판매채널,실제판매가,수량\r\n2026-08-02,제품,채널,2000,2\r\n"
+        path = "/api/sbrocor/finance/v1/sales/import?workspace_id=1"
+
+        body, content_type = self.multipart_import("sales.csv", csv, "append", True)
+        preview = self.request_bytes("POST", path, body, content_type)
+        self.assertEqual(preview.status_code, 200, preview.get_data(as_text=True))
+        self.assertEqual((preview.json["existing"], preview.json["add"]), (1, 1))
+        self.assertEqual(len(self.request("GET", "/api/sbrocor/finance/v1/sales?workspace_id=1").json["items"]), 1)
+
+        body, content_type = self.multipart_import("sales.csv", csv, "append", False)
+        applied_append = self.request_bytes("POST", path, body, content_type)
+        self.assertEqual(applied_append.status_code, 200, applied_append.get_data(as_text=True))
+        self.assertEqual(len(self.request("GET", "/api/sbrocor/finance/v1/sales?workspace_id=1").json["items"]), 2)
+
+        employee = {"actor_uid": "employee", "role": "employee", "workspace_ids": [1], "permissions": ["sales"]}
+        body, content_type = self.multipart_import("sales.csv", csv, "replace", True)
+        denied = self.request_bytes("POST", path, body, content_type, context=employee)
+        self.assertEqual(denied.status_code, 403)
+
+        body, content_type = self.multipart_import("sales.csv", csv, "replace", True)
+        replace_preview = self.request_bytes("POST", path, body, content_type)
+        self.assertEqual(replace_preview.status_code, 200, replace_preview.get_data(as_text=True))
+        self.assertEqual((replace_preview.json["existing"], replace_preview.json["delete"], replace_preview.json["add"]), (2, 2, 1))
+
+        body, content_type = self.multipart_import("sales.csv", csv, "replace", False)
+        blocked = self.request_bytes("POST", path, body, content_type)
+        self.assertEqual(blocked.status_code, 400)
+        self.assertEqual(len(self.request("GET", "/api/sbrocor/finance/v1/sales?workspace_id=1").json["items"]), 2)
+
+        body, content_type = self.multipart_import("sales.csv", csv, "replace", False, "REPLACE SALES")
+        applied = self.request_bytes("POST", path, body, content_type)
+        self.assertEqual(applied.status_code, 200, applied.get_data(as_text=True))
+        imported = self.request("GET", "/api/sbrocor/finance/v1/sales?workspace_id=1")
+        self.assertEqual(len(imported.json["items"]), 1)
+        self.assertEqual(imported.json["items"][0]["total_selling_amount"], 2000)
 
     def test_meta_settings_never_persist_or_return_token(self):
         self.create_workspace(1)
