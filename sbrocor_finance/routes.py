@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import sqlite3
 import io
+import logging
 import os
 import re
 import uuid
 from datetime import date, datetime, timedelta
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pandas as pd
 import requests
@@ -20,6 +22,91 @@ from .service import FinanceService
 
 
 finance_blueprint = Blueprint("sbrocor_finance", __name__, url_prefix="/api/sbrocor/finance/v1")
+logger = logging.getLogger(__name__)
+
+
+class MetaApiError(Exception):
+    """A safe, public representation of an upstream Meta API failure."""
+
+    def __init__(self, detail: str, *, meta_code=None, meta_subcode=None):
+        super().__init__(detail)
+        self.detail = detail
+        self.meta_code = meta_code
+        self.meta_subcode = meta_subcode
+
+
+def _without_access_token(url: str) -> str:
+    """Remove credentials Meta may include in a paging.next URL."""
+    parts = urlsplit(url)
+    query = urlencode(
+        [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if key.lower() != "access_token"]
+    )
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
+
+
+def _safe_meta_message(value: object, token: str) -> str:
+    message = str(value or "").strip()
+    if token:
+        message = message.replace(token, "[REDACTED]")
+    message = re.sub(r"(?i)(access_token=)[^&\s]+", r"\1[REDACTED]", message)
+    return message[:500]
+
+
+def _meta_get(
+    url: str,
+    *,
+    token: str,
+    params: dict | None,
+    workspace_id: int,
+    connection_id: int | str,
+    account_id: str,
+) -> dict:
+    safe_url = _without_access_token(url)
+    try:
+        response = requests.get(
+            safe_url,
+            params=params,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=60,
+        )
+    except requests.Timeout:
+        logger.warning(
+            "Meta sync failed workspace_id=%s connection_id=%s account_id=%s failure_kind=timeout",
+            workspace_id, connection_id, account_id,
+        )
+        raise MetaApiError("Meta API 요청에 실패했습니다.") from None
+    except requests.RequestException:
+        logger.warning(
+            "Meta sync failed workspace_id=%s connection_id=%s account_id=%s failure_kind=network",
+            workspace_id, connection_id, account_id,
+        )
+        raise MetaApiError("Meta API 요청에 실패했습니다.") from None
+
+    status = int(getattr(response, "status_code", 200))
+    try:
+        payload = response.json()
+    except (TypeError, ValueError):
+        payload = None
+    if not 200 <= status < 300:
+        meta_error = payload.get("error", {}) if isinstance(payload, dict) else {}
+        message = _safe_meta_message(meta_error.get("message"), token)
+        meta_code = meta_error.get("code")
+        meta_subcode = meta_error.get("error_subcode")
+        logger.warning(
+            "Meta sync failed workspace_id=%s connection_id=%s account_id=%s status=%s "
+            "meta_code=%s meta_subcode=%s message=%s",
+            workspace_id, connection_id, account_id, status, meta_code, meta_subcode,
+            message or "non_json_error",
+        )
+        detail = f"Meta API: {message}" if message else "Meta API 요청에 실패했습니다."
+        raise MetaApiError(detail, meta_code=meta_code, meta_subcode=meta_subcode)
+    if not isinstance(payload, dict):
+        logger.warning(
+            "Meta sync failed workspace_id=%s connection_id=%s account_id=%s status=%s failure_kind=invalid_json",
+            workspace_id, connection_id, account_id, status,
+        )
+        raise MetaApiError("Meta API 요청에 실패했습니다.")
+    return payload
 
 RESOURCE_PERMISSION = {
     "transactions": "transactions", "categories": "categories", "products": "products",
@@ -125,6 +212,16 @@ def _query_options(resource: str) -> dict:
         "search": request.args.get("search"),
         "filters": filters,
     }
+
+
+@finance_blueprint.errorhandler(MetaApiError)
+def _meta_api_error(error):
+    payload = {"error": "meta_api_error", "detail": error.detail}
+    if error.meta_code is not None:
+        payload["meta_code"] = error.meta_code
+    if error.meta_subcode is not None:
+        payload["meta_subcode"] = error.meta_subcode
+    return jsonify(payload), 502
 
 
 @finance_blueprint.errorhandler(ValueError)
@@ -562,8 +659,15 @@ def meta_fetch():
     with finance_connection() as connection:
         row = connection.execute("SELECT meta_ad_account_id FROM workspace_settings WHERE workspace_id=?", (workspace_id,)).fetchone()
         if not row or not row[0]: raise ValueError("Meta ad account is not configured")
-        response = requests.get(f"https://graph.facebook.com/v23.0/{row[0]}/insights", params={"access_token": token, "level":"ad", "time_range":f'{{"since":"{start}","until":"{end}"}}', "time_increment":1, "fields":"date_start,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,impressions,clicks,ctr,cpc,cpm,actions,action_values", "limit":5000}, timeout=60)
-        response.raise_for_status(); items = response.json().get("data", [])
+        page = _meta_get(
+            f"https://graph.facebook.com/v23.0/{row[0]}/insights",
+            token=token,
+            params={"level":"ad", "time_range":f'{{"since":"{start}","until":"{end}"}}', "time_increment":1, "fields":"date_start,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,impressions,clicks,ctr,cpc,cpm,actions,action_values", "limit":5000},
+            workspace_id=workspace_id,
+            connection_id="legacy",
+            account_id=str(row[0]),
+        )
+        items = page.get("data", [])
         saved = 0
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -597,7 +701,7 @@ def sync_ad_account(connection_id: int):
         if not token: return jsonify(error="meta_token_not_configured"), 503
         next_url = f"https://graph.facebook.com/v23.0/{account['account_id']}/insights"
         next_params = {
-            "access_token": token, "level": "ad", "time_range": f'{{"since":"{start}","until":"{end}"}}',
+            "level": "ad", "time_range": f'{{"since":"{start}","until":"{end}"}}',
             "time_increment": 1, "fields": "date_start,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,impressions,clicks,ctr,cpc,cpm,actions,action_values", "limit": 5000,
         }
         items: list[dict] = []
@@ -606,9 +710,14 @@ def sync_ad_account(connection_id: int):
             if next_url in visited_pages:
                 raise ValueError("Meta pagination loop detected")
             visited_pages.add(next_url)
-            response = requests.get(next_url, params=next_params, timeout=60)
-            response.raise_for_status()
-            page = response.json()
+            page = _meta_get(
+                next_url,
+                token=token,
+                params=next_params,
+                workspace_id=workspace_id,
+                connection_id=connection_id,
+                account_id=str(account["account_id"]),
+            )
             page_items = page.get("data", [])
             if not isinstance(page_items, list):
                 raise ValueError("Meta response data must be a list")
