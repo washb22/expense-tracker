@@ -265,7 +265,11 @@ class FinanceRepository:
                 ).fetchone()
                 if not product:
                     raise ValueError("allocation product must belong to the workspace")
-                if brand_id is not None and product["brand_id"] is not None and int(product["brand_id"]) != brand_id:
+                if brand_id is None:
+                    raise ValueError("allocation brand is required when a product is selected")
+                if product["brand_id"] is None:
+                    raise ValueError("allocation product must have a brand before it can be selected")
+                if int(product["brand_id"]) != brand_id:
                     raise ValueError("allocation product does not belong to the selected brand")
             prepared.append({
                 "id": str(allocation.get("id") or uuid.uuid4()),

@@ -511,6 +511,47 @@ class FinanceApiTest(unittest.TestCase):
         self.assertEqual(summary.json["total_advertising_cost"], 1000)
         self.assertEqual(ads.json["summary"]["spend"], 777)
 
+    def test_marketing_allocation_requires_product_brand_consistency(self):
+        self.create_workspace(1)
+        brand_a = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "등원한끼"}).json
+        brand_b = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "NOTE'O"}).json
+        product_a = self.request("POST", "/api/sbrocor/finance/v1/products?workspace_id=1", {
+            "id": 21, "name": "등원한끼 제품", "cost_price": 1000, "brand_id": brand_a["id"],
+        }).json
+        product_b = self.request("POST", "/api/sbrocor/finance/v1/products?workspace_id=1", {
+            "id": 22, "name": "NOTE'O 제품", "cost_price": 1000, "brand_id": brand_b["id"],
+        }).json
+        product_without_brand = self.request("POST", "/api/sbrocor/finance/v1/products?workspace_id=1", {
+            "id": 23, "name": "기존 미지정 제품", "cost_price": 1000,
+        }).json
+
+        for transaction_id in ("same-brand", "different-brand", "brandless-product", "brand-common"):
+            response = self.request("POST", "/api/sbrocor/finance/v1/transactions?workspace_id=1", {
+                "id": transaction_id, "date": "2026-08-24", "merchant": transaction_id,
+                "amount": 1000, "category": "광고비",
+            })
+            self.assertEqual(response.status_code, 201, response.get_data(as_text=True))
+
+        same_brand = self.request("PUT", "/api/sbrocor/finance/v1/transactions/same-brand/marketing-allocations?workspace_id=1", {
+            "allocations": [{"brand_id": brand_a["id"], "product_id": product_a["id"], "channel": "Meta", "amount": 1000}],
+        })
+        self.assertEqual(same_brand.status_code, 200, same_brand.get_data(as_text=True))
+
+        different_brand = self.request("PUT", "/api/sbrocor/finance/v1/transactions/different-brand/marketing-allocations?workspace_id=1", {
+            "allocations": [{"brand_id": brand_a["id"], "product_id": product_b["id"], "channel": "Meta", "amount": 1000}],
+        })
+        self.assertEqual(different_brand.status_code, 400)
+
+        brandless_product = self.request("PUT", "/api/sbrocor/finance/v1/transactions/brandless-product/marketing-allocations?workspace_id=1", {
+            "allocations": [{"brand_id": brand_a["id"], "product_id": product_without_brand["id"], "channel": "Meta", "amount": 1000}],
+        })
+        self.assertEqual(brandless_product.status_code, 400)
+
+        brand_common = self.request("PUT", "/api/sbrocor/finance/v1/transactions/brand-common/marketing-allocations?workspace_id=1", {
+            "allocations": [{"brand_id": brand_a["id"], "product_id": None, "channel": "Meta", "amount": 1000}],
+        })
+        self.assertEqual(brand_common.status_code, 200, brand_common.get_data(as_text=True))
+
     def test_additive_reinitialize_preserves_transaction_sale_and_ad_spend(self):
         self.create_workspace(1)
         self.request("POST", "/api/sbrocor/finance/v1/transactions?workspace_id=1", {"id": "tx", "date": "2026-08-01", "merchant": "Meta", "amount": 1234, "category": "광고비"})
