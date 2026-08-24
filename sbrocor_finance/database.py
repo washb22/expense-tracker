@@ -10,7 +10,7 @@ from typing import Iterator
 from .config import get_finance_database_path
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -29,6 +29,14 @@ CREATE TABLE IF NOT EXISTS finance_transaction (
     amount INTEGER NOT NULL,
     category TEXT NOT NULL DEFAULT '미분류'
 );
+CREATE TABLE IF NOT EXISTS brand (
+    id INTEGER PRIMARY KEY,
+    workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE RESTRICT,
+    name TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(workspace_id, name)
+);
 CREATE TABLE IF NOT EXISTS rule (
     id INTEGER PRIMARY KEY,
     workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE RESTRICT,
@@ -42,6 +50,7 @@ CREATE TABLE IF NOT EXISTS product (
     sku TEXT,
     cost_price INTEGER NOT NULL,
     category TEXT,
+    brand_id INTEGER REFERENCES brand(id) ON DELETE SET NULL,
     created_at TEXT
 );
 CREATE TABLE IF NOT EXISTS platform (
@@ -94,6 +103,18 @@ CREATE TABLE IF NOT EXISTS ad_spend (
     created_at TEXT,
     UNIQUE(workspace_id, date, platform, ad_id)
 );
+CREATE TABLE IF NOT EXISTS marketing_allocation (
+    id TEXT PRIMARY KEY,
+    workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE RESTRICT,
+    transaction_id TEXT NOT NULL REFERENCES finance_transaction(id) ON DELETE CASCADE,
+    brand_id INTEGER REFERENCES brand(id) ON DELETE RESTRICT,
+    product_id INTEGER REFERENCES product(id) ON DELETE RESTRICT,
+    channel TEXT NOT NULL,
+    amount INTEGER NOT NULL CHECK(amount > 0),
+    memo TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS auth_nonce (
     key_id TEXT NOT NULL,
     nonce TEXT NOT NULL,
@@ -103,7 +124,22 @@ CREATE TABLE IF NOT EXISTS auth_nonce (
 CREATE INDEX IF NOT EXISTS ix_transaction_workspace_date ON finance_transaction(workspace_id, date);
 CREATE INDEX IF NOT EXISTS ix_sale_workspace_date ON sale(workspace_id, date);
 CREATE INDEX IF NOT EXISTS ix_ad_spend_workspace_date ON ad_spend(workspace_id, date);
+CREATE INDEX IF NOT EXISTS ix_brand_workspace_active ON brand(workspace_id, active, name);
+CREATE INDEX IF NOT EXISTS ix_allocation_workspace_transaction ON marketing_allocation(workspace_id, transaction_id);
+CREATE INDEX IF NOT EXISTS ix_allocation_workspace_brand ON marketing_allocation(workspace_id, brand_id);
+CREATE INDEX IF NOT EXISTS ix_allocation_workspace_product ON marketing_allocation(workspace_id, product_id);
+CREATE INDEX IF NOT EXISTS ix_allocation_workspace_channel ON marketing_allocation(workspace_id, channel);
 """
+
+
+def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
+    """Upgrade an existing Finance DB without changing any financial rows."""
+    product_columns = {row[1] for row in connection.execute("PRAGMA table_info(product)")}
+    if "brand_id" not in product_columns:
+        connection.execute(
+            "ALTER TABLE product ADD COLUMN brand_id INTEGER REFERENCES brand(id) ON DELETE SET NULL"
+        )
+    connection.execute("CREATE INDEX IF NOT EXISTS ix_product_workspace_brand ON product(workspace_id, brand_id)")
 
 
 def connect(path: Path | None = None) -> sqlite3.Connection:
@@ -124,6 +160,7 @@ def initialize_database(path: Path | None = None) -> Path:
     with connect(database_path) as connection:
         connection.execute("PRAGMA journal_mode=WAL")
         connection.executescript(SCHEMA_SQL)
+        _apply_additive_migrations(connection)
         connection.execute("INSERT OR IGNORE INTO schema_version(version) VALUES (?)", (SCHEMA_VERSION,))
         connection.commit()
     return database_path

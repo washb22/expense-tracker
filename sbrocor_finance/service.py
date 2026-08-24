@@ -19,6 +19,12 @@ class FinanceService:
 
     def create_resource(self, resource: str, workspace_id: int, payload: dict[str, Any]) -> dict[str, Any]:
         self.require_workspace(workspace_id)
+        if resource == "brands":
+            payload = {**payload, "active": 1 if payload.get("active", True) else 0}
+        if resource == "products" and payload.get("brand_id") not in (None, ""):
+            brand = self.repository.get_resource("brands", workspace_id, str(payload["brand_id"]))
+            if not brand:
+                raise ValueError("product brand must belong to the same workspace")
         if resource == "sales":
             product = self.repository.get_resource("products", workspace_id, str(payload.get("product_id", "")))
             platform = self.repository.get_resource("platforms", workspace_id, str(payload.get("platform_id", "")))
@@ -35,10 +41,28 @@ class FinanceService:
             raise ValueError("workspace mismatch")
         product_ids = {int(item["id"]) for item in manifest.get("products", [])}
         platform_ids = {int(item["id"]) for item in manifest.get("platforms", [])}
+        brand_ids = {int(item["id"]) for item in manifest.get("brands", [])}
+        transaction_ids = {str(item["id"]) for item in manifest.get("transactions", [])}
+        for product in manifest.get("products", []):
+            if product.get("brand_id") is not None and int(product["brand_id"]) not in brand_ids:
+                raise ValueError("product references a brand outside the manifest workspace")
         for sale in manifest.get("sales", []):
             if int(sale["product_id"]) not in product_ids or int(sale["platform_id"]) not in platform_ids:
                 raise ValueError("sale references a product/platform outside the manifest workspace")
-        counts = {key: len(manifest.get(key, [])) for key in ("transactions", "categories", "products", "platforms", "sales", "ads")}
+        allocation_totals: dict[str, int] = {}
+        for allocation in manifest.get("marketing_allocations", []):
+            transaction_id = str(allocation.get("transaction_id", ""))
+            if transaction_id not in transaction_ids:
+                raise ValueError("allocation references a transaction outside the manifest workspace")
+            if allocation.get("brand_id") is not None and int(allocation["brand_id"]) not in brand_ids:
+                raise ValueError("allocation references a brand outside the manifest workspace")
+            if allocation.get("product_id") is not None and int(allocation["product_id"]) not in product_ids:
+                raise ValueError("allocation references a product outside the manifest workspace")
+            allocation_totals[transaction_id] = allocation_totals.get(transaction_id, 0) + int(allocation["amount"])
+        transaction_amounts = {str(item["id"]): int(item["amount"]) for item in manifest.get("transactions", [])}
+        if any(total != transaction_amounts[transaction_id] for transaction_id, total in allocation_totals.items()):
+            raise ValueError("allocation totals must match their transaction amounts")
+        counts = {key: len(manifest.get(key, [])) for key in ("transactions", "categories", "brands", "products", "platforms", "sales", "ads", "marketing_allocations")}
         if not dry_run:
             raise PermissionError("destructive import is disabled on the Finance API")
         return {"dry_run": True, "counts": counts}
