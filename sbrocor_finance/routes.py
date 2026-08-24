@@ -15,7 +15,7 @@ from flask import Blueprint, g, jsonify, request, send_file
 
 from .auth import require_server_hmac
 from .database import finance_connection
-from .repository import FinanceRepository, RESOURCE_CONFIG
+from .repository import FinanceRepository, MARKETING_CHANNELS, RESOURCE_CONFIG
 from .service import FinanceService
 
 
@@ -23,7 +23,7 @@ finance_blueprint = Blueprint("sbrocor_finance", __name__, url_prefix="/api/sbro
 
 RESOURCE_PERMISSION = {
     "transactions": "transactions", "categories": "categories", "products": "products",
-    "platforms": "products", "sales": "sales", "ads": "ads",
+    "platforms": "products", "brands": "products", "sales": "sales", "ads": "ads",
 }
 
 
@@ -203,7 +203,7 @@ def ads_analytics():
 
 def _resource_collection(resource: str):
     workspace_id = _workspace_id()
-    _authorize(RESOURCE_PERMISSION[resource], workspace_id)
+    _authorize(RESOURCE_PERMISSION[resource], workspace_id, admin_only=resource == "brands" and request.method != "GET")
     with finance_connection() as connection:
         repository = FinanceRepository(connection)
         service = FinanceService(repository)
@@ -216,15 +216,31 @@ def _resource_collection(resource: str):
 
 def _resource_item(resource: str, item_id: str):
     workspace_id = _workspace_id()
-    _authorize(RESOURCE_PERMISSION[resource], workspace_id)
+    _authorize(RESOURCE_PERMISSION[resource], workspace_id, admin_only=resource == "brands" and request.method != "GET")
     with finance_connection() as connection:
         repository = FinanceRepository(connection)
         FinanceService(repository).require_workspace(workspace_id)
         if request.method == "GET":
             item = repository.get_resource(resource, workspace_id, item_id)
         elif request.method == "PATCH":
-            item = repository.update_resource(resource, workspace_id, item_id, _json_payload())
+            payload = _json_payload()
+            if resource == "products" and payload.get("brand_id") not in (None, ""):
+                if not repository.get_resource("brands", workspace_id, str(payload["brand_id"])):
+                    raise ValueError("product brand must belong to the same workspace")
+            if resource == "transactions":
+                current = repository.get_resource(resource, workspace_id, item_id)
+                allocations = repository.get_marketing_allocations(workspace_id, item_id)
+                if allocations and (
+                    ("category" in payload and payload["category"] != "광고비")
+                    or ("amount" in payload and int(payload["amount"]) != int(current["amount"] if current else 0))
+                ):
+                    raise ValueError("remove or update marketing allocations before changing category or amount")
+            if resource == "brands" and "active" in payload:
+                payload["active"] = 1 if payload["active"] else 0
+            item = repository.update_resource(resource, workspace_id, item_id, payload)
         else:
+            if resource == "brands":
+                raise ValueError("brands must be deactivated instead of deleted")
             return ("", 204) if repository.delete_resource(resource, workspace_id, item_id) else (jsonify(error="not_found"), 404)
         return jsonify(item) if item else (jsonify(error="not_found"), 404)
 
@@ -242,6 +258,43 @@ for _resource in RESOURCE_CONFIG:
         view_func=require_server_hmac(lambda item_id, resource=_resource: _resource_item(resource, item_id)),
         methods=["GET", "PATCH", "DELETE"],
     )
+
+
+@finance_blueprint.get("/marketing/channels")
+@require_server_hmac
+def marketing_channels():
+    workspace_id = _workspace_id(); _authorize("transactions", workspace_id)
+    return jsonify(items=list(MARKETING_CHANNELS))
+
+
+@finance_blueprint.route("/transactions/<transaction_id>/marketing-allocations", methods=["GET", "PUT"])
+@require_server_hmac
+def transaction_marketing_allocations(transaction_id: str):
+    workspace_id = _workspace_id(); _authorize("transactions", workspace_id)
+    with finance_connection() as connection:
+        repository = FinanceRepository(connection)
+        FinanceService(repository).require_workspace(workspace_id)
+        if request.method == "GET":
+            transaction = repository.get_resource("transactions", workspace_id, transaction_id)
+            if not transaction:
+                raise LookupError("transaction not found")
+            return jsonify(items=repository.get_marketing_allocations(workspace_id, transaction_id))
+        allocations = _json_payload().get("allocations")
+        if not isinstance(allocations, list):
+            raise ValueError("allocations must be a list")
+        return jsonify(items=repository.replace_marketing_allocations(workspace_id, transaction_id, allocations))
+
+
+@finance_blueprint.get("/marketing-allocations/summary")
+@require_server_hmac
+def marketing_allocation_summary():
+    workspace_id = _workspace_id(); _authorize("dashboard", workspace_id)
+    with finance_connection() as connection:
+        repository = FinanceRepository(connection)
+        FinanceService(repository).require_workspace(workspace_id)
+        return jsonify(repository.marketing_summary(
+            workspace_id, _month(), request.args.get("start_date"), request.args.get("end_date")
+        ))
 
 
 @finance_blueprint.post("/transactions/import")

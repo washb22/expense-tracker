@@ -424,6 +424,157 @@ class FinanceApiTest(unittest.TestCase):
             columns = {row[1] for row in connection.execute("PRAGMA table_info(workspace_settings)")}
         self.assertNotIn("meta_access_token", columns)
 
+    def test_additive_brand_migration_preserves_existing_product(self):
+        legacy_path = Path(self.tempdir.name) / "legacy-finance-v1.db"
+        connection = sqlite3.connect(legacy_path)
+        connection.executescript("""
+            CREATE TABLE workspace(id INTEGER PRIMARY KEY,name TEXT NOT NULL);
+            CREATE TABLE product(id INTEGER PRIMARY KEY,workspace_id INTEGER NOT NULL,name TEXT NOT NULL,sku TEXT,cost_price INTEGER NOT NULL,category TEXT,created_at TEXT);
+            INSERT INTO workspace(id,name) VALUES (1,'기존 사업장');
+            INSERT INTO product(id,workspace_id,name,cost_price) VALUES (10,1,'기존 제품',5000);
+        """)
+        connection.close()
+        initialize_database(legacy_path)
+        with closing(connect(legacy_path)) as migrated:
+            columns = {row[1] for row in migrated.execute("PRAGMA table_info(product)")}
+            product = migrated.execute("SELECT id,name,cost_price,brand_id FROM product WHERE id=10").fetchone()
+            tables = {row[0] for row in migrated.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertIn("brand_id", columns)
+        self.assertEqual(dict(product), {"id": 10, "name": "기존 제품", "cost_price": 5000, "brand_id": None})
+        self.assertTrue({"brand", "marketing_allocation"}.issubset(tables))
+
+    def test_brand_product_and_marketing_allocation_crud_and_summary(self):
+        self.create_workspace(1)
+        brand_a = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "등원한끼"})
+        brand_b = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "NOTE'O"})
+        self.assertEqual(brand_a.status_code, 201, brand_a.get_data(as_text=True))
+        self.assertEqual(brand_a.json["active"], 1)
+        product = self.request("POST", "/api/sbrocor/finance/v1/products?workspace_id=1", {
+            "id": 10, "name": "바디워시", "cost_price": 1000, "brand_id": brand_b.json["id"],
+        })
+        self.assertEqual(product.status_code, 201, product.get_data(as_text=True))
+        products = self.request("GET", "/api/sbrocor/finance/v1/products?workspace_id=1")
+        self.assertEqual(products.json["items"][0]["brand_name"], "NOTE'O")
+
+        for item in (
+            {"id": "old-ad", "date": "2026-08-01", "merchant": "과거 광고", "amount": 1000, "category": "광고비"},
+            {"id": "single-ad", "date": "2026-08-02", "merchant": "단일 광고", "amount": 2000, "category": "광고비"},
+            {"id": "split-ad", "date": "2026-08-03", "merchant": "분할 광고", "amount": 5000, "category": "광고비"},
+        ):
+            self.assertEqual(self.request("POST", "/api/sbrocor/finance/v1/transactions?workspace_id=1", item).status_code, 201)
+
+        single = self.request("PUT", "/api/sbrocor/finance/v1/transactions/single-ad/marketing-allocations?workspace_id=1", {
+            "allocations": [{"brand_id": brand_a.json["id"], "channel": "Meta", "amount": 2000}],
+        })
+        self.assertEqual(single.status_code, 200, single.get_data(as_text=True))
+        self.assertEqual(len(single.json["items"]), 1)
+
+        mismatch = self.request("PUT", "/api/sbrocor/finance/v1/transactions/split-ad/marketing-allocations?workspace_id=1", {
+            "allocations": [{"brand_id": brand_a.json["id"], "channel": "Meta", "amount": 4999}],
+        })
+        self.assertEqual(mismatch.status_code, 400)
+        self.assertEqual(self.request("GET", "/api/sbrocor/finance/v1/transactions/split-ad/marketing-allocations?workspace_id=1").json["items"], [])
+
+        split = self.request("PUT", "/api/sbrocor/finance/v1/transactions/split-ad/marketing-allocations?workspace_id=1", {
+            "allocations": [
+                {"brand_id": brand_a.json["id"], "channel": "Meta", "amount": 3000, "memo": "브랜드 공통"},
+                {"brand_id": brand_b.json["id"], "product_id": 10, "channel": "Meta", "amount": 1500},
+                {"channel": "기타", "amount": 500},
+            ],
+        })
+        self.assertEqual(split.status_code, 200, split.get_data(as_text=True))
+        self.assertEqual(sum(item["amount"] for item in split.json["items"]), 5000)
+
+        summary = self.request("GET", "/api/sbrocor/finance/v1/marketing-allocations/summary?workspace_id=1&month=2026-08")
+        self.assertEqual(summary.status_code, 200, summary.get_data(as_text=True))
+        self.assertEqual(summary.json["total_advertising_cost"], 8000)
+        self.assertEqual(summary.json["allocated_amount"], 7000)
+        self.assertEqual(summary.json["unallocated_amount"], 1000)
+        self.assertEqual(next(item["amount"] for item in summary.json["brands"] if item["name"] == "등원한끼"), 5000)
+        self.assertEqual(next(item["amount"] for item in summary.json["channels"] if item["name"] == "Meta"), 6500)
+        self.assertTrue(any(item["name"] == "미지정" and item["amount"] == 1500 for item in summary.json["brands"]))
+        self.assertTrue(any(item["name"] == "바디워시" and item["amount"] == 1500 for item in summary.json["products"]))
+
+        deactivated = self.request("PATCH", f"/api/sbrocor/finance/v1/brands/{brand_a.json['id']}?workspace_id=1", {"active": False})
+        self.assertEqual(deactivated.json["active"], 0)
+        self.assertEqual(self.request("DELETE", f"/api/sbrocor/finance/v1/brands/{brand_a.json['id']}?workspace_id=1").status_code, 400)
+
+    def test_brand_mutation_is_admin_only_and_ad_spend_remains_separate(self):
+        self.create_workspace(1)
+        employee = {"actor_uid": "employee", "role": "employee", "workspace_ids": [1], "permissions": ["products", "transactions", "dashboard", "ads"]}
+        self.assertEqual(self.request("GET", "/api/sbrocor/finance/v1/brands?workspace_id=1", context=employee).status_code, 200)
+        self.assertEqual(self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "차단"}, context=employee).status_code, 403)
+        self.request("POST", "/api/sbrocor/finance/v1/transactions?workspace_id=1", {"id": "cost", "date": "2026-08-01", "merchant": "Meta", "amount": 1000, "category": "광고비"})
+        self.request("POST", "/api/sbrocor/finance/v1/ads?workspace_id=1", {"id": 1, "date": "2026-08-01", "platform": "meta", "spend": 777})
+        summary = self.request("GET", "/api/sbrocor/finance/v1/marketing-allocations/summary?workspace_id=1")
+        ads = self.request("GET", "/api/sbrocor/finance/v1/ads/analytics?workspace_id=1")
+        self.assertEqual(summary.json["total_advertising_cost"], 1000)
+        self.assertEqual(ads.json["summary"]["spend"], 777)
+
+    def test_marketing_allocation_requires_product_brand_consistency(self):
+        self.create_workspace(1)
+        brand_a = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "등원한끼"}).json
+        brand_b = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "NOTE'O"}).json
+        product_a = self.request("POST", "/api/sbrocor/finance/v1/products?workspace_id=1", {
+            "id": 21, "name": "등원한끼 제품", "cost_price": 1000, "brand_id": brand_a["id"],
+        }).json
+        product_b = self.request("POST", "/api/sbrocor/finance/v1/products?workspace_id=1", {
+            "id": 22, "name": "NOTE'O 제품", "cost_price": 1000, "brand_id": brand_b["id"],
+        }).json
+        product_without_brand = self.request("POST", "/api/sbrocor/finance/v1/products?workspace_id=1", {
+            "id": 23, "name": "기존 미지정 제품", "cost_price": 1000,
+        }).json
+
+        for transaction_id in ("same-brand", "different-brand", "brandless-product", "brand-common"):
+            response = self.request("POST", "/api/sbrocor/finance/v1/transactions?workspace_id=1", {
+                "id": transaction_id, "date": "2026-08-24", "merchant": transaction_id,
+                "amount": 1000, "category": "광고비",
+            })
+            self.assertEqual(response.status_code, 201, response.get_data(as_text=True))
+
+        same_brand = self.request("PUT", "/api/sbrocor/finance/v1/transactions/same-brand/marketing-allocations?workspace_id=1", {
+            "allocations": [{"brand_id": brand_a["id"], "product_id": product_a["id"], "channel": "Meta", "amount": 1000}],
+        })
+        self.assertEqual(same_brand.status_code, 200, same_brand.get_data(as_text=True))
+
+        different_brand = self.request("PUT", "/api/sbrocor/finance/v1/transactions/different-brand/marketing-allocations?workspace_id=1", {
+            "allocations": [{"brand_id": brand_a["id"], "product_id": product_b["id"], "channel": "Meta", "amount": 1000}],
+        })
+        self.assertEqual(different_brand.status_code, 400)
+
+        brandless_product = self.request("PUT", "/api/sbrocor/finance/v1/transactions/brandless-product/marketing-allocations?workspace_id=1", {
+            "allocations": [{"brand_id": brand_a["id"], "product_id": product_without_brand["id"], "channel": "Meta", "amount": 1000}],
+        })
+        self.assertEqual(brandless_product.status_code, 400)
+
+        brand_common = self.request("PUT", "/api/sbrocor/finance/v1/transactions/brand-common/marketing-allocations?workspace_id=1", {
+            "allocations": [{"brand_id": brand_a["id"], "product_id": None, "channel": "Meta", "amount": 1000}],
+        })
+        self.assertEqual(brand_common.status_code, 200, brand_common.get_data(as_text=True))
+
+    def test_additive_reinitialize_preserves_transaction_sale_and_ad_spend(self):
+        self.create_workspace(1)
+        self.request("POST", "/api/sbrocor/finance/v1/transactions?workspace_id=1", {"id": "tx", "date": "2026-08-01", "merchant": "Meta", "amount": 1234, "category": "광고비"})
+        self.request("POST", "/api/sbrocor/finance/v1/products?workspace_id=1", {"id": 1, "name": "제품", "cost_price": 50})
+        self.request("POST", "/api/sbrocor/finance/v1/platforms?workspace_id=1", {"id": 1, "name": "채널", "commission_rate": 10})
+        self.request("POST", "/api/sbrocor/finance/v1/sales?workspace_id=1", {"id": "sale", "date": "2026-08-01", "product_id": 1, "platform_id": 1, "selling_price": 500, "quantity": 2, "total_selling_amount": 500, "total_cost_amount": 100, "commission_amount": 50, "net_profit": 350})
+        self.request("POST", "/api/sbrocor/finance/v1/ads?workspace_id=1", {"id": 1, "date": "2026-08-01", "platform": "meta", "spend": 777})
+        with closing(connect()) as connection:
+            before = {
+                "transaction": tuple(connection.execute("SELECT amount,category FROM finance_transaction WHERE id='tx'").fetchone()),
+                "sale": tuple(connection.execute("SELECT total_selling_amount,total_cost_amount,commission_amount,net_profit FROM sale WHERE id='sale'").fetchone()),
+                "ad_spend": tuple(connection.execute("SELECT spend FROM ad_spend WHERE id=1").fetchone()),
+            }
+        initialize_database()
+        with closing(connect()) as connection:
+            after = {
+                "transaction": tuple(connection.execute("SELECT amount,category FROM finance_transaction WHERE id='tx'").fetchone()),
+                "sale": tuple(connection.execute("SELECT total_selling_amount,total_cost_amount,commission_amount,net_profit FROM sale WHERE id='sale'").fetchone()),
+                "ad_spend": tuple(connection.execute("SELECT spend FROM ad_spend WHERE id=1").fetchone()),
+            }
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM marketing_allocation").fetchone()[0], 0)
+        self.assertEqual(after, before)
+
 
 if __name__ == "__main__":
     unittest.main()

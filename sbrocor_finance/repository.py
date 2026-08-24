@@ -7,6 +7,7 @@ import uuid
 import math
 from typing import Any, Iterable
 
+MARKETING_CHANNELS = ("Meta", "네이버", "Google", "카카오", "바이럴", "인플루언서", "체험단", "대행사", "기타")
 
 RESOURCE_CONFIG = {
     "transactions": {
@@ -20,9 +21,14 @@ RESOURCE_CONFIG = {
         "fields": ("id", "keyword", "category"),
         "required": ("keyword", "category"),
     },
+    "brands": {
+        "table": "brand",
+        "fields": ("id", "name", "active", "created_at"),
+        "required": ("name",),
+    },
     "products": {
         "table": "product",
-        "fields": ("id", "name", "sku", "cost_price", "category", "created_at"),
+        "fields": ("id", "name", "sku", "cost_price", "category", "brand_id", "created_at"),
         "required": ("name", "cost_price"),
     },
     "platforms": {
@@ -119,7 +125,7 @@ class FinanceRepository:
     ) -> dict[str, Any]:
         config = RESOURCE_CONFIG[resource]
         table = config["table"]
-        clauses = ["workspace_id=?"]
+        clauses = [f"{table}.workspace_id=?"]
         params: list[Any] = [workspace_id]
         if "date" in config["fields"]:
             if month:
@@ -133,11 +139,11 @@ class FinanceRepository:
                 params.append(end_date)
         searchable = [field for field in ("merchant", "category", "keyword", "name", "sku", "campaign_name", "adset_name", "ad_name") if field in config["fields"]]
         if search and searchable:
-            clauses.append("(" + " OR ".join(f"{field} LIKE ?" for field in searchable) + ")")
+            clauses.append("(" + " OR ".join(f"{table}.{field} LIKE ?" for field in searchable) + ")")
             params.extend([f"%{search}%"] * len(searchable))
         for field, value in (filters or {}).items():
             if value not in (None, "") and field in config["fields"]:
-                clauses.append(f"{field}=?")
+                clauses.append(f"{table}.{field}=?")
                 params.append(value)
         where = " AND ".join(clauses)
         total = int(self.connection.execute(f"SELECT COUNT(*) FROM {table} WHERE {where}", params).fetchone()[0])
@@ -146,7 +152,8 @@ class FinanceRepository:
         order = "date DESC, id DESC" if "date" in config["fields"] else "id DESC"
         select = "*"
         if resource == "products":
-            select = "product.*, (SELECT COUNT(*) FROM sale WHERE sale.workspace_id=product.workspace_id AND sale.product_id=product.id) sale_count"
+            select = "product.*, brand.name brand_name, (SELECT COUNT(*) FROM sale WHERE sale.workspace_id=product.workspace_id AND sale.product_id=product.id) sale_count"
+            table = "product LEFT JOIN brand ON brand.id=product.brand_id AND brand.workspace_id=product.workspace_id"
         elif resource == "platforms":
             select = "platform.*, (SELECT COUNT(*) FROM sale WHERE sale.workspace_id=platform.workspace_id AND sale.platform_id=platform.id) sale_count"
         rows = self.connection.execute(
@@ -205,6 +212,147 @@ class FinanceRepository:
         self.connection.commit()
         return cursor.rowcount == 1
 
+    def get_marketing_allocations(self, workspace_id: int, transaction_id: str) -> list[dict[str, Any]]:
+        return [dict(row) for row in self.connection.execute(
+            "SELECT a.*, b.name brand_name, p.name product_name "
+            "FROM marketing_allocation a "
+            "LEFT JOIN brand b ON b.id=a.brand_id AND b.workspace_id=a.workspace_id "
+            "LEFT JOIN product p ON p.id=a.product_id AND p.workspace_id=a.workspace_id "
+            "WHERE a.workspace_id=? AND a.transaction_id=? ORDER BY a.created_at,a.id",
+            (workspace_id, transaction_id),
+        )]
+
+    def replace_marketing_allocations(
+        self, workspace_id: int, transaction_id: str, allocations: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        transaction = self.connection.execute(
+            "SELECT id,amount,category FROM finance_transaction WHERE id=? AND workspace_id=?",
+            (transaction_id, workspace_id),
+        ).fetchone()
+        if not transaction:
+            raise LookupError("transaction not found")
+        if transaction["category"] != "광고비":
+            raise ValueError("marketing allocation is only available for 광고비 transactions")
+        if not allocations:
+            self.connection.execute(
+                "DELETE FROM marketing_allocation WHERE workspace_id=? AND transaction_id=?",
+                (workspace_id, transaction_id),
+            )
+            self.connection.commit()
+            return []
+        prepared: list[dict[str, Any]] = []
+        for allocation in allocations:
+            amount = int(allocation.get("amount", 0))
+            if amount <= 0:
+                raise ValueError("allocation amount must be greater than zero")
+            brand_id = int(allocation["brand_id"]) if allocation.get("brand_id") not in (None, "") else None
+            product_id = int(allocation["product_id"]) if allocation.get("product_id") not in (None, "") else None
+            channel = str(allocation.get("channel", "")).strip()
+            if not channel:
+                raise ValueError("allocation channel is required")
+            if channel not in MARKETING_CHANNELS:
+                raise ValueError("unsupported marketing channel")
+            brand = None
+            if brand_id is not None:
+                brand = self.connection.execute(
+                    "SELECT id FROM brand WHERE id=? AND workspace_id=? AND active=1", (brand_id, workspace_id)
+                ).fetchone()
+                if not brand:
+                    raise ValueError("allocation brand must be active and belong to the workspace")
+            if product_id is not None:
+                product = self.connection.execute(
+                    "SELECT id,brand_id FROM product WHERE id=? AND workspace_id=?", (product_id, workspace_id)
+                ).fetchone()
+                if not product:
+                    raise ValueError("allocation product must belong to the workspace")
+                if brand_id is None:
+                    raise ValueError("allocation brand is required when a product is selected")
+                if product["brand_id"] is None:
+                    raise ValueError("allocation product must have a brand before it can be selected")
+                if int(product["brand_id"]) != brand_id:
+                    raise ValueError("allocation product does not belong to the selected brand")
+            prepared.append({
+                "id": str(allocation.get("id") or uuid.uuid4()),
+                "brand_id": brand_id,
+                "product_id": product_id,
+                "channel": channel,
+                "amount": amount,
+                "memo": str(allocation.get("memo", "")).strip() or None,
+            })
+        if sum(item["amount"] for item in prepared) != int(transaction["amount"]):
+            raise ValueError("allocation amount total must equal the transaction amount")
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            self.connection.execute(
+                "DELETE FROM marketing_allocation WHERE workspace_id=? AND transaction_id=?",
+                (workspace_id, transaction_id),
+            )
+            self.connection.executemany(
+                "INSERT INTO marketing_allocation(id,workspace_id,transaction_id,brand_id,product_id,channel,amount,memo) "
+                "VALUES (:id,:workspace_id,:transaction_id,:brand_id,:product_id,:channel,:amount,:memo)",
+                [{**item, "workspace_id": workspace_id, "transaction_id": transaction_id} for item in prepared],
+            )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+        return self.get_marketing_allocations(workspace_id, transaction_id)
+
+    def marketing_summary(
+        self, workspace_id: int, month: str | None = None,
+        start_date: str | None = None, end_date: str | None = None,
+    ) -> dict[str, Any]:
+        conditions = ["t.workspace_id=?", "t.category='광고비'"]
+        params: list[Any] = [workspace_id]
+        if month:
+            conditions.append("substr(t.date,1,7)=?"); params.append(month)
+        if start_date:
+            conditions.append("substr(t.date,1,10)>=?"); params.append(start_date)
+        if end_date:
+            conditions.append("substr(t.date,1,10)<=?"); params.append(end_date)
+        where = " AND ".join(conditions)
+        total = int(self.connection.execute(
+            f"SELECT COALESCE(SUM(t.amount),0) FROM finance_transaction t WHERE {where}", params
+        ).fetchone()[0])
+        allocated = int(self.connection.execute(
+            f"SELECT COALESCE(SUM(a.amount),0) FROM marketing_allocation a "
+            f"JOIN finance_transaction t ON t.id=a.transaction_id AND t.workspace_id=a.workspace_id WHERE {where}", params
+        ).fetchone()[0])
+        brands = [dict(row) for row in self.connection.execute(
+            f"SELECT a.brand_id,COALESCE(b.name,'미지정') name,SUM(a.amount) amount "
+            f"FROM marketing_allocation a JOIN finance_transaction t ON t.id=a.transaction_id AND t.workspace_id=a.workspace_id "
+            f"LEFT JOIN brand b ON b.id=a.brand_id AND b.workspace_id=a.workspace_id WHERE {where} "
+            "GROUP BY a.brand_id,b.name ORDER BY amount DESC", params,
+        )]
+        if total > allocated:
+            unassigned = next((item for item in brands if item["brand_id"] is None), None)
+            if unassigned:
+                unassigned["amount"] += total - allocated
+            else:
+                brands.append({"brand_id": None, "name": "미지정", "amount": total - allocated})
+        channels = [dict(row) for row in self.connection.execute(
+            f"SELECT a.channel name,SUM(a.amount) amount FROM marketing_allocation a "
+            f"JOIN finance_transaction t ON t.id=a.transaction_id AND t.workspace_id=a.workspace_id WHERE {where} "
+            "GROUP BY a.channel ORDER BY amount DESC", params,
+        )]
+        if total > allocated:
+            channels.append({"name": "미지정", "amount": total - allocated})
+        products = [dict(row) for row in self.connection.execute(
+            f"SELECT a.brand_id,a.product_id,COALESCE(p.name,'브랜드 공통') name,SUM(a.amount) amount "
+            f"FROM marketing_allocation a JOIN finance_transaction t ON t.id=a.transaction_id AND t.workspace_id=a.workspace_id "
+            f"LEFT JOIN product p ON p.id=a.product_id AND p.workspace_id=a.workspace_id WHERE {where} "
+            "GROUP BY a.brand_id,a.product_id,p.name ORDER BY amount DESC", params,
+        )]
+        return {
+            "workspace_id": workspace_id,
+            "total_advertising_cost": total,
+            "allocated_amount": allocated,
+            "unallocated_amount": total - allocated,
+            "brands": brands,
+            "channels": channels,
+            "products": products,
+        }
+
     def import_if_empty(self, workspace_id: int, data: dict[str, Any]) -> dict[str, int]:
         if int(data["workspace"]["id"]) != workspace_id:
             raise ValueError("manifest workspace does not match URL workspace")
@@ -222,10 +370,18 @@ class FinanceRepository:
                 "INSERT INTO workspace(id,name) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name",
                 (workspace_id, data["workspace"]["name"]),
             )
-            for resource in ("transactions", "categories", "products", "platforms", "sales", "ads"):
+            for resource in ("transactions", "categories", "brands", "products", "platforms", "sales", "ads"):
                 for item in data.get(resource, []):
                     self.create_resource_uncommitted(resource, workspace_id, item)
                 counts[resource] = len(data.get(resource, []))
+            for item in data.get("marketing_allocations", []):
+                fields = ("id", "transaction_id", "brand_id", "product_id", "channel", "amount", "memo", "created_at", "updated_at")
+                present = [field for field in fields if field in item]
+                self.connection.execute(
+                    f"INSERT INTO marketing_allocation(workspace_id,{','.join(present)}) VALUES ({','.join('?' for _ in range(len(present) + 1))})",
+                    [workspace_id, *(item[field] for field in present)],
+                )
+            counts["marketing_allocations"] = len(data.get("marketing_allocations", []))
             settings = data.get("workspace_settings")
             if settings:
                 self.connection.execute(
@@ -252,8 +408,11 @@ class FinanceRepository:
         if not workspace:
             return None
         payload: dict[str, Any] = {"manifest_version": 1, "workspace": workspace}
-        for resource in ("transactions", "categories", "products", "platforms", "sales", "ads"):
+        for resource in ("transactions", "categories", "brands", "products", "platforms", "sales", "ads"):
             payload[resource] = self.list_resource(resource, workspace_id)
+        payload["marketing_allocations"] = [dict(row) for row in self.connection.execute(
+            "SELECT * FROM marketing_allocation WHERE workspace_id=? ORDER BY transaction_id,id", (workspace_id,)
+        )]
         row = self.connection.execute("SELECT * FROM workspace_settings WHERE workspace_id=?", (workspace_id,)).fetchone()
         payload["workspace_settings"] = dict(row) if row else None
         return payload
