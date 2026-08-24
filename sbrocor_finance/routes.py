@@ -24,7 +24,30 @@ finance_blueprint = Blueprint("sbrocor_finance", __name__, url_prefix="/api/sbro
 RESOURCE_PERMISSION = {
     "transactions": "transactions", "categories": "categories", "products": "products",
     "platforms": "products", "brands": "products", "sales": "sales", "ads": "ads",
+    "ad-accounts": "ads",
 }
+
+
+def _credential_token(account: sqlite3.Row | dict, workspace_id: int) -> str | None:
+    if str(account["platform"] or "").lower() != "meta":
+        return None
+    key = str(account["credential_key"] or "").strip().upper()
+    return os.getenv(f"SBROCOR_META_ACCESS_TOKEN_{key}") or os.getenv(f"SBROCOR_META_ACCESS_TOKEN_WORKSPACE_{workspace_id}")
+
+
+def _public_ad_account(item: dict, workspace_id: int, connection: sqlite3.Connection) -> dict:
+    identity_locked = bool(connection.execute(
+        "SELECT EXISTS(SELECT 1 FROM marketing_spend WHERE workspace_id=? AND ad_account_connection_id=?) "
+        "OR EXISTS(SELECT 1 FROM ad_spend WHERE workspace_id=? AND ad_account_connection_id=?)",
+        (workspace_id, item["id"], workspace_id, item["id"]),
+    ).fetchone()[0])
+    sync_supported = str(item.get("platform") or "").lower() == "meta"
+    return {
+        **item,
+        "credential_configured": sync_supported and bool(_credential_token(item, workspace_id)),
+        "sync_supported": sync_supported,
+        "identity_locked": identity_locked,
+    }
 
 
 def _authorize(permission: str, workspace_id: int | None = None, *, admin_only: bool = False) -> None:
@@ -204,20 +227,25 @@ def ads_analytics():
 
 def _resource_collection(resource: str):
     workspace_id = _workspace_id()
-    _authorize(RESOURCE_PERMISSION[resource], workspace_id, admin_only=resource == "brands" and request.method != "GET")
+    _authorize(RESOURCE_PERMISSION[resource], workspace_id, admin_only=resource in {"brands", "ad-accounts"} and request.method != "GET")
     with finance_connection() as connection:
         repository = FinanceRepository(connection)
         service = FinanceService(repository)
         service.require_workspace(workspace_id)
         if request.method == "GET":
-            return jsonify(repository.query_resource(resource, workspace_id, **_query_options(resource)))
+            result = repository.query_resource(resource, workspace_id, **_query_options(resource))
+            if resource == "ad-accounts":
+                result["items"] = [_public_ad_account(item, workspace_id, connection) for item in result["items"]]
+            return jsonify(result)
         payload = _json_payload()
-        return jsonify(service.create_resource(resource, workspace_id, payload)), 201
+        created = service.create_resource(resource, workspace_id, payload)
+        if resource == "ad-accounts": created = _public_ad_account(created, workspace_id, connection)
+        return jsonify(created), 201
 
 
 def _resource_item(resource: str, item_id: str):
     workspace_id = _workspace_id()
-    _authorize(RESOURCE_PERMISSION[resource], workspace_id, admin_only=resource == "brands" and request.method != "GET")
+    _authorize(RESOURCE_PERMISSION[resource], workspace_id, admin_only=resource in {"brands", "ad-accounts"} and request.method != "GET")
     with finance_connection() as connection:
         repository = FinanceRepository(connection)
         FinanceService(repository).require_workspace(workspace_id)
@@ -238,11 +266,37 @@ def _resource_item(resource: str, item_id: str):
                     raise ValueError("remove or update marketing allocations before changing category or amount")
             if resource == "brands" and "active" in payload:
                 payload["active"] = 1 if payload["active"] else 0
+            if resource == "ad-accounts":
+                current = repository.get_resource(resource, workspace_id, item_id)
+                if not current:
+                    raise LookupError("ad account connection not found")
+                identity_fields = {"platform", "account_id", "brand_id", "currency"}
+                identity_changes = {
+                    field for field in identity_fields
+                    if field in payload and str(payload[field]).strip().lower() != str(current[field]).strip().lower()
+                }
+                if identity_changes:
+                    has_synced_data = connection.execute(
+                        "SELECT EXISTS(SELECT 1 FROM marketing_spend WHERE workspace_id=? AND ad_account_connection_id=?) "
+                        "OR EXISTS(SELECT 1 FROM ad_spend WHERE workspace_id=? AND ad_account_connection_id=?)",
+                        (workspace_id, item_id, workspace_id, item_id),
+                    ).fetchone()[0]
+                    if has_synced_data:
+                        raise ValueError("synced ad account identity fields cannot be changed")
+                if payload.get("brand_id") not in (None, "") and not repository.get_resource("brands", workspace_id, str(payload["brand_id"])):
+                    raise ValueError("ad account brand must belong to the same workspace")
+                if "credential_key" in payload:
+                    payload["credential_key"] = str(payload["credential_key"]).strip().upper()
+                    if not payload["credential_key"].replace("_", "").isalnum():
+                        raise ValueError("invalid credential_key")
+                if "currency" in payload: payload["currency"] = str(payload["currency"]).strip().upper()
+                if "active" in payload: payload["active"] = 1 if payload["active"] else 0
             item = repository.update_resource(resource, workspace_id, item_id, payload)
         else:
             if resource == "brands":
                 raise ValueError("brands must be deactivated instead of deleted")
             return ("", 204) if repository.delete_resource(resource, workspace_id, item_id) else (jsonify(error="not_found"), 404)
+        if item and resource == "ad-accounts": item = _public_ad_account(item, workspace_id, connection)
         return jsonify(item) if item else (jsonify(error="not_found"), 404)
 
 
@@ -520,6 +574,94 @@ def meta_fetch():
             connection.commit()
         except Exception: connection.rollback(); raise
     return jsonify(saved=saved,start_date=start,end_date=end)
+
+
+@finance_blueprint.post("/ad-accounts/<int:connection_id>/sync")
+@require_server_hmac
+def sync_ad_account(connection_id: int):
+    workspace_id = _workspace_id(); _authorize("ads", workspace_id, admin_only=True); payload = _json_payload()
+    start = payload.get("start_date") or payload.get("target_date"); end = payload.get("end_date") or payload.get("target_date")
+    if not start or not end: raise ValueError("target_date or start/end date is required")
+    start_day = date.fromisoformat(start); end_day = date.fromisoformat(end)
+    if start_day > end_day: raise ValueError("start_date must be on or before end_date")
+    if (end_day - start_day).days > 370: raise ValueError("range is too large")
+    with finance_connection() as connection:
+        account = connection.execute(
+            "SELECT ac.*,b.name brand_name FROM ad_account_connection ac JOIN brand b ON b.id=ac.brand_id AND b.workspace_id=ac.workspace_id "
+            "WHERE ac.id=? AND ac.workspace_id=?", (connection_id, workspace_id),
+        ).fetchone()
+        if not account: raise LookupError("ad account connection not found")
+        if not account["active"]: raise ValueError("ad account connection is inactive")
+        if account["platform"] != "meta": raise ValueError("sync is not implemented for this platform")
+        token = _credential_token(account, workspace_id)
+        if not token: return jsonify(error="meta_token_not_configured"), 503
+        next_url = f"https://graph.facebook.com/v23.0/{account['account_id']}/insights"
+        next_params = {
+            "access_token": token, "level": "ad", "time_range": f'{{"since":"{start}","until":"{end}"}}',
+            "time_increment": 1, "fields": "date_start,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,impressions,clicks,ctr,cpc,cpm,actions,action_values", "limit": 5000,
+        }
+        items: list[dict] = []
+        visited_pages: set[str] = set()
+        for _page_number in range(100):
+            if next_url in visited_pages:
+                raise ValueError("Meta pagination loop detected")
+            visited_pages.add(next_url)
+            response = requests.get(next_url, params=next_params, timeout=60)
+            response.raise_for_status()
+            page = response.json()
+            page_items = page.get("data", [])
+            if not isinstance(page_items, list):
+                raise ValueError("Meta response data must be a list")
+            items.extend(page_items)
+            if len(items) > 100000:
+                raise ValueError("Meta sync row limit exceeded")
+            next_page = page.get("paging", {}).get("next")
+            if not next_page:
+                break
+            if not isinstance(next_page, str):
+                raise ValueError("Meta pagination URL is invalid")
+            next_url = next_page
+            next_params = None
+        else:
+            raise ValueError("Meta pagination page limit exceeded")
+        daily_spend: dict[str, float] = {}
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for item in items:
+                day = str(item.get("date_start")); spend = float(item.get("spend", 0)); daily_spend[day] = daily_spend.get(day, 0) + spend
+                actions = {entry.get("action_type"): float(entry.get("value",0)) for entry in item.get("actions",[])}
+                values = {entry.get("action_type"): float(entry.get("value",0)) for entry in item.get("action_values",[])}
+                conversions = actions.get("purchase",0); revenue = values.get("purchase",0)
+                connection.execute(
+                    "INSERT INTO ad_spend(workspace_id,date,platform,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,impressions,clicks,ctr,cpc,cpm,conversions,conversion_value,roas,ad_account_connection_id,brand_id) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id,date,platform,ad_id) DO UPDATE SET "
+                    "campaign_name=excluded.campaign_name,adset_name=excluded.adset_name,ad_name=excluded.ad_name,spend=excluded.spend,impressions=excluded.impressions,clicks=excluded.clicks,ctr=excluded.ctr,cpc=excluded.cpc,cpm=excluded.cpm,conversions=excluded.conversions,conversion_value=excluded.conversion_value,roas=excluded.roas,ad_account_connection_id=excluded.ad_account_connection_id,brand_id=excluded.brand_id",
+                    (workspace_id,day,"meta",item.get("campaign_id"),item.get("campaign_name"),item.get("adset_id"),item.get("adset_name"),item.get("ad_id"),item.get("ad_name"),spend,int(item.get("impressions",0)),int(item.get("clicks",0)),float(item.get("ctr",0)),float(item.get("cpc",0)),float(item.get("cpm",0)),conversions,revenue,revenue/spend if spend else 0,connection_id,account["brand_id"]),
+                )
+            cursor = start_day; synced_days = 0
+            while cursor <= end_day:
+                day = cursor.isoformat(); original = daily_spend.get(day, 0.0); currency = str(account["currency"]).upper()
+                amount_krw = round(original) if currency == "KRW" else None
+                external_key = f"meta:{account['account_id']}:{day}:account"
+                connection.execute(
+                    "INSERT INTO marketing_spend(workspace_id,ad_account_connection_id,brand_id,product_id,date,channel,original_amount,currency,fx_rate,amount_krw,source,external_key) "
+                    "VALUES (?,?,?,NULL,?,'Meta',?,?,NULL,?,'meta_api',?) ON CONFLICT(workspace_id,source,external_key) DO UPDATE SET "
+                    "ad_account_connection_id=excluded.ad_account_connection_id,brand_id=excluded.brand_id,original_amount=excluded.original_amount,currency=excluded.currency,fx_rate=excluded.fx_rate,amount_krw=excluded.amount_krw,updated_at=CURRENT_TIMESTAMP",
+                    (workspace_id,connection_id,account["brand_id"],day,original,currency,amount_krw,external_key),
+                ); synced_days += 1; cursor += timedelta(days=1)
+            connection.execute("UPDATE ad_account_connection SET last_synced_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?", (connection_id,workspace_id))
+            connection.commit()
+        except Exception: connection.rollback(); raise
+    return jsonify(
+        connection_id=connection_id,
+        raw_saved=len(items),
+        days_synced=synced_days,
+        zero_spend_days=synced_days - len(daily_spend),
+        start_date=start,
+        end_date=end,
+        currency=account["currency"],
+        currency_converted=str(account["currency"]).upper()=="KRW",
+    )
 
 
 @finance_blueprint.get("/workspaces/<int:workspace_id>/export")

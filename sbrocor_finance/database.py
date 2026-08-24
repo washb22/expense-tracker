@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -10,7 +11,7 @@ from typing import Iterator
 from .config import get_finance_database_path
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -101,7 +102,42 @@ CREATE TABLE IF NOT EXISTS ad_spend (
     conversion_value REAL NOT NULL DEFAULT 0,
     roas REAL NOT NULL DEFAULT 0,
     created_at TEXT,
+    ad_account_connection_id INTEGER REFERENCES ad_account_connection(id) ON DELETE RESTRICT,
+    brand_id INTEGER REFERENCES brand(id) ON DELETE RESTRICT,
     UNIQUE(workspace_id, date, platform, ad_id)
+);
+CREATE TABLE IF NOT EXISTS ad_account_connection (
+    id INTEGER PRIMARY KEY,
+    workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE RESTRICT,
+    brand_id INTEGER NOT NULL REFERENCES brand(id) ON DELETE RESTRICT,
+    platform TEXT NOT NULL CHECK(platform IN ('meta', 'naver')),
+    account_id TEXT NOT NULL,
+    account_name TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    credential_key TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
+    last_synced_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(workspace_id, platform, account_id)
+);
+CREATE TABLE IF NOT EXISTS marketing_spend (
+    id INTEGER PRIMARY KEY,
+    workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE RESTRICT,
+    ad_account_connection_id INTEGER NOT NULL REFERENCES ad_account_connection(id) ON DELETE RESTRICT,
+    brand_id INTEGER NOT NULL REFERENCES brand(id) ON DELETE RESTRICT,
+    product_id INTEGER REFERENCES product(id) ON DELETE RESTRICT,
+    date TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    original_amount REAL NOT NULL,
+    currency TEXT NOT NULL,
+    fx_rate REAL,
+    amount_krw INTEGER,
+    source TEXT NOT NULL,
+    external_key TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(workspace_id, source, external_key)
 );
 CREATE TABLE IF NOT EXISTS marketing_allocation (
     id TEXT PRIMARY KEY,
@@ -124,6 +160,9 @@ CREATE TABLE IF NOT EXISTS auth_nonce (
 CREATE INDEX IF NOT EXISTS ix_transaction_workspace_date ON finance_transaction(workspace_id, date);
 CREATE INDEX IF NOT EXISTS ix_sale_workspace_date ON sale(workspace_id, date);
 CREATE INDEX IF NOT EXISTS ix_ad_spend_workspace_date ON ad_spend(workspace_id, date);
+CREATE INDEX IF NOT EXISTS ix_ad_account_workspace_brand ON ad_account_connection(workspace_id, brand_id, active);
+CREATE INDEX IF NOT EXISTS ix_marketing_spend_workspace_date ON marketing_spend(workspace_id, date);
+CREATE INDEX IF NOT EXISTS ix_marketing_spend_brand_date ON marketing_spend(workspace_id, brand_id, date);
 CREATE INDEX IF NOT EXISTS ix_brand_workspace_active ON brand(workspace_id, active, name);
 CREATE INDEX IF NOT EXISTS ix_allocation_workspace_transaction ON marketing_allocation(workspace_id, transaction_id);
 CREATE INDEX IF NOT EXISTS ix_allocation_workspace_brand ON marketing_allocation(workspace_id, brand_id);
@@ -140,6 +179,15 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
             "ALTER TABLE product ADD COLUMN brand_id INTEGER REFERENCES brand(id) ON DELETE SET NULL"
         )
     connection.execute("CREATE INDEX IF NOT EXISTS ix_product_workspace_brand ON product(workspace_id, brand_id)")
+    ad_spend_columns = {row[1] for row in connection.execute("PRAGMA table_info(ad_spend)")}
+    if "ad_account_connection_id" not in ad_spend_columns:
+        connection.execute(
+            "ALTER TABLE ad_spend ADD COLUMN ad_account_connection_id INTEGER REFERENCES ad_account_connection(id) ON DELETE RESTRICT"
+        )
+    if "brand_id" not in ad_spend_columns:
+        connection.execute(
+            "ALTER TABLE ad_spend ADD COLUMN brand_id INTEGER REFERENCES brand(id) ON DELETE RESTRICT"
+        )
 
 
 def connect(path: Path | None = None) -> sqlite3.Connection:
@@ -157,7 +205,7 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
 def initialize_database(path: Path | None = None) -> Path:
     database_path = (path or get_finance_database_path()).resolve()
     database_path.parent.mkdir(parents=True, exist_ok=True)
-    with connect(database_path) as connection:
+    with closing(connect(database_path)) as connection:
         connection.execute("PRAGMA journal_mode=WAL")
         connection.executescript(SCHEMA_SQL)
         _apply_additive_migrations(connection)

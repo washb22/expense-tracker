@@ -25,6 +25,23 @@ class FinanceService:
             brand = self.repository.get_resource("brands", workspace_id, str(payload["brand_id"]))
             if not brand:
                 raise ValueError("product brand must belong to the same workspace")
+        if resource == "ad-accounts":
+            brand = self.repository.get_resource("brands", workspace_id, str(payload.get("brand_id", "")))
+            if not brand:
+                raise ValueError("ad account brand must belong to the same workspace")
+            platform = str(payload.get("platform", "")).lower().strip()
+            if platform not in {"meta", "naver"}:
+                raise ValueError("unsupported ad account platform")
+            credential_key = str(payload.get("credential_key", "")).strip().upper()
+            if not credential_key or not credential_key.replace("_", "").isalnum():
+                raise ValueError("credential_key must contain only letters, numbers, and underscores")
+            payload = {
+                **payload,
+                "platform": platform,
+                "currency": str(payload.get("currency", "")).strip().upper(),
+                "credential_key": credential_key,
+                "active": 1 if payload.get("active", True) else 0,
+            }
         if resource == "sales":
             product = self.repository.get_resource("products", workspace_id, str(payload.get("product_id", "")))
             platform = self.repository.get_resource("platforms", workspace_id, str(payload.get("platform_id", "")))
