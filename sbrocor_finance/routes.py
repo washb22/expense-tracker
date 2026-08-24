@@ -29,12 +29,25 @@ RESOURCE_PERMISSION = {
 
 
 def _credential_token(account: sqlite3.Row | dict, workspace_id: int) -> str | None:
+    if str(account["platform"] or "").lower() != "meta":
+        return None
     key = str(account["credential_key"] or "").strip().upper()
     return os.getenv(f"SBROCOR_META_ACCESS_TOKEN_{key}") or os.getenv(f"SBROCOR_META_ACCESS_TOKEN_WORKSPACE_{workspace_id}")
 
 
-def _public_ad_account(item: dict, workspace_id: int) -> dict:
-    return {**item, "credential_configured": bool(_credential_token(item, workspace_id))}
+def _public_ad_account(item: dict, workspace_id: int, connection: sqlite3.Connection) -> dict:
+    identity_locked = bool(connection.execute(
+        "SELECT EXISTS(SELECT 1 FROM marketing_spend WHERE workspace_id=? AND ad_account_connection_id=?) "
+        "OR EXISTS(SELECT 1 FROM ad_spend WHERE workspace_id=? AND ad_account_connection_id=?)",
+        (workspace_id, item["id"], workspace_id, item["id"]),
+    ).fetchone()[0])
+    sync_supported = str(item.get("platform") or "").lower() == "meta"
+    return {
+        **item,
+        "credential_configured": sync_supported and bool(_credential_token(item, workspace_id)),
+        "sync_supported": sync_supported,
+        "identity_locked": identity_locked,
+    }
 
 
 def _authorize(permission: str, workspace_id: int | None = None, *, admin_only: bool = False) -> None:
@@ -222,11 +235,11 @@ def _resource_collection(resource: str):
         if request.method == "GET":
             result = repository.query_resource(resource, workspace_id, **_query_options(resource))
             if resource == "ad-accounts":
-                result["items"] = [_public_ad_account(item, workspace_id) for item in result["items"]]
+                result["items"] = [_public_ad_account(item, workspace_id, connection) for item in result["items"]]
             return jsonify(result)
         payload = _json_payload()
         created = service.create_resource(resource, workspace_id, payload)
-        if resource == "ad-accounts": created = _public_ad_account(created, workspace_id)
+        if resource == "ad-accounts": created = _public_ad_account(created, workspace_id, connection)
         return jsonify(created), 201
 
 
@@ -254,6 +267,22 @@ def _resource_item(resource: str, item_id: str):
             if resource == "brands" and "active" in payload:
                 payload["active"] = 1 if payload["active"] else 0
             if resource == "ad-accounts":
+                current = repository.get_resource(resource, workspace_id, item_id)
+                if not current:
+                    raise LookupError("ad account connection not found")
+                identity_fields = {"platform", "account_id", "brand_id", "currency"}
+                identity_changes = {
+                    field for field in identity_fields
+                    if field in payload and str(payload[field]).strip().lower() != str(current[field]).strip().lower()
+                }
+                if identity_changes:
+                    has_synced_data = connection.execute(
+                        "SELECT EXISTS(SELECT 1 FROM marketing_spend WHERE workspace_id=? AND ad_account_connection_id=?) "
+                        "OR EXISTS(SELECT 1 FROM ad_spend WHERE workspace_id=? AND ad_account_connection_id=?)",
+                        (workspace_id, item_id, workspace_id, item_id),
+                    ).fetchone()[0]
+                    if has_synced_data:
+                        raise ValueError("synced ad account identity fields cannot be changed")
                 if payload.get("brand_id") not in (None, "") and not repository.get_resource("brands", workspace_id, str(payload["brand_id"])):
                     raise ValueError("ad account brand must belong to the same workspace")
                 if "credential_key" in payload:
@@ -267,7 +296,7 @@ def _resource_item(resource: str, item_id: str):
             if resource == "brands":
                 raise ValueError("brands must be deactivated instead of deleted")
             return ("", 204) if repository.delete_resource(resource, workspace_id, item_id) else (jsonify(error="not_found"), 404)
-        if item and resource == "ad-accounts": item = _public_ad_account(item, workspace_id)
+        if item and resource == "ad-accounts": item = _public_ad_account(item, workspace_id, connection)
         return jsonify(item) if item else (jsonify(error="not_found"), 404)
 
 

@@ -1031,6 +1031,75 @@ class FinanceApiTest(unittest.TestCase):
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM marketing_spend").fetchone()[0], 0)
             self.assertIsNone(connection.execute("SELECT last_synced_at FROM ad_account_connection WHERE id=?", (account["id"],)).fetchone()[0])
 
+    def test_inactive_account_preserves_historical_spend_and_identity(self):
+        self.create_workspace(1)
+        brand = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "역사 브랜드"}).json
+        other_brand = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "다른 브랜드"}).json
+        with patch.dict(os.environ, {
+            "SBROCOR_META_ACCESS_TOKEN_HISTORY": "server-secret",
+            "SBROCOR_META_ACCESS_TOKEN_HISTORY_NEW": "new-server-secret",
+        }, clear=False):
+            account = self.request("POST", "/api/sbrocor/finance/v1/ad-accounts?workspace_id=1", {
+                "brand_id": brand["id"], "platform": "meta", "account_id": "act_history",
+                "account_name": "역사 계정", "currency": "KRW", "credential_key": "HISTORY",
+            }).json
+            class HistoryResponse:
+                def raise_for_status(self): return None
+                def json(self): return {"data": [
+                    {"date_start": "2026-08-01", "ad_id": "history-1", "spend": "100000"},
+                    {"date_start": "2026-08-02", "ad_id": "history-2", "spend": "200000"},
+                ]}
+            with patch("sbrocor_finance.routes.requests.get", return_value=HistoryResponse()):
+                synced = self.request("POST", f"/api/sbrocor/finance/v1/ad-accounts/{account['id']}/sync?workspace_id=1", {"start_date": "2026-08-01", "end_date": "2026-08-02"})
+            self.assertEqual(synced.status_code, 200)
+
+            for field, value in (
+                ("account_id", "act_changed"), ("platform", "naver"),
+                ("brand_id", other_brand["id"]), ("currency", "USD"),
+            ):
+                blocked = self.request("PATCH", f"/api/sbrocor/finance/v1/ad-accounts/{account['id']}?workspace_id=1", {field: value})
+                self.assertEqual(blocked.status_code, 400, (field, blocked.get_data(as_text=True)))
+
+            allowed = self.request("PATCH", f"/api/sbrocor/finance/v1/ad-accounts/{account['id']}?workspace_id=1", {
+                "account_name": "역사 계정 수정", "credential_key": "HISTORY_NEW", "active": False,
+            })
+            self.assertEqual(allowed.status_code, 200, allowed.get_data(as_text=True))
+            self.assertEqual(allowed.json["account_name"], "역사 계정 수정")
+            self.assertEqual(allowed.json["credential_key"], "HISTORY_NEW")
+            self.assertEqual(allowed.json["active"], 0)
+            self.assertTrue(allowed.json["identity_locked"])
+
+        historical_path = ("/api/sbrocor/finance/v1/sales-analysis/compare?workspace_id=1"
+                           "&a_start=2026-08-01&a_end=2026-08-02&b_start=2026-08-01&b_end=2026-08-02")
+        historical = self.request("GET", historical_path).json["periods"]["a"]["totals"]
+        self.assertTrue(historical["spend_analysis_ready"])
+        self.assertTrue(historical["spend_coverage"]["complete"])
+        self.assertEqual(historical["actual_advertising_spend"], 300000)
+
+        future_path = ("/api/sbrocor/finance/v1/sales-analysis/compare?workspace_id=1"
+                       "&a_start=2026-09-01&a_end=2026-09-02&b_start=2026-09-01&b_end=2026-09-02")
+        future = self.request("GET", future_path).json["periods"]["a"]["totals"]
+        self.assertFalse(future["spend_analysis_ready"])
+        self.assertEqual(future["spend_coverage"]["account_count"], 0)
+        self.assertIsNone(future["actual_advertising_spend"])
+
+    def test_naver_is_explicitly_not_sync_supported_or_meta_credential_configured(self):
+        self.create_workspace(1)
+        brand = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "네이버 브랜드"}).json
+        with patch.dict(os.environ, {"SBROCOR_META_ACCESS_TOKEN_WORKSPACE_1": "meta-only-secret"}, clear=False):
+            created = self.request("POST", "/api/sbrocor/finance/v1/ad-accounts?workspace_id=1", {
+                "brand_id": brand["id"], "platform": "naver", "account_id": "naver-account",
+                "account_name": "네이버 계정", "currency": "KRW", "credential_key": "NAVER_MAIN",
+            })
+            self.assertEqual(created.status_code, 201, created.get_data(as_text=True))
+            self.assertFalse(created.json["sync_supported"])
+            self.assertFalse(created.json["credential_configured"])
+            listed = self.request("GET", "/api/sbrocor/finance/v1/ad-accounts?workspace_id=1&page=1&page_size=20").json["items"][0]
+            self.assertFalse(listed["sync_supported"])
+            self.assertFalse(listed["credential_configured"])
+            sync = self.request("POST", f"/api/sbrocor/finance/v1/ad-accounts/{created.json['id']}/sync?workspace_id=1", {"start_date": "2026-08-01", "end_date": "2026-08-01"})
+            self.assertEqual(sync.status_code, 400)
+
 
 if __name__ == "__main__":
     unittest.main()

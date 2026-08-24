@@ -439,20 +439,20 @@ class FinanceRepository:
             actual_ad = int(self.connection.execute(
                 "SELECT COALESCE(SUM(ms.amount_krw),0) FROM marketing_spend ms "
                 "JOIN ad_account_connection ac ON ac.id=ms.ad_account_connection_id AND ac.workspace_id=ms.workspace_id "
-                "WHERE ms.workspace_id=? AND ac.active=1 AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=?" + spend_scope,
+                "WHERE ms.workspace_id=? AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=?" + spend_scope,
                 [workspace_id, start_date, end_date, *spend_params],
             ).fetchone()[0])
             direct_ad = int(self.connection.execute(
                 "SELECT COALESCE(SUM(ms.amount_krw),0) FROM marketing_spend ms "
                 "JOIN ad_account_connection ac ON ac.id=ms.ad_account_connection_id AND ac.workspace_id=ms.workspace_id "
-                "WHERE ms.workspace_id=? AND ac.active=1 AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=? AND ms.product_id IS NOT NULL" +
+                "WHERE ms.workspace_id=? AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=? AND ms.product_id IS NOT NULL" +
                 (" AND ms.product_id=?" if product_id is not None else " AND ms.brand_id=?" if brand_id is not None else ""),
                 [workspace_id, start_date, end_date, *( [product_id] if product_id is not None else [brand_id] if brand_id is not None else [] )],
             ).fetchone()[0])
             brand_common_ad = int(self.connection.execute(
                 "SELECT COALESCE(SUM(ms.amount_krw),0) FROM marketing_spend ms "
                 "JOIN ad_account_connection ac ON ac.id=ms.ad_account_connection_id AND ac.workspace_id=ms.workspace_id "
-                "WHERE ms.workspace_id=? AND ac.active=1 AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=? AND ms.product_id IS NULL" +
+                "WHERE ms.workspace_id=? AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=? AND ms.product_id IS NULL" +
                 (" AND ms.brand_id=?" if brand_id is not None else ""),
                 [workspace_id, start_date, end_date, *( [brand_id] if brand_id is not None else [] )],
             ).fetchone()[0])
@@ -468,32 +468,34 @@ class FinanceRepository:
                 "AND substr(t.date,1,10)>=? AND substr(t.date,1,10)<=?", (workspace_id, start_date, end_date),
             ).fetchone()[0])
             days = (date.fromisoformat(end_date) - date.fromisoformat(start_date)).days + 1
-            active_accounts = int(self.connection.execute(
-                "SELECT COUNT(*) FROM ad_account_connection WHERE workspace_id=? AND active=1" +
-                (" AND brand_id=?" if brand_id is not None else ""),
-                [workspace_id, *( [brand_id] if brand_id is not None else [] )],
+            analysis_accounts = int(self.connection.execute(
+                "SELECT COUNT(*) FROM ad_account_connection ac WHERE ac.workspace_id=?" +
+                (" AND ac.brand_id=?" if brand_id is not None else "") +
+                " AND (ac.active=1 OR EXISTS(SELECT 1 FROM marketing_spend ms WHERE ms.workspace_id=ac.workspace_id "
+                "AND ms.ad_account_connection_id=ac.id AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=?))",
+                [workspace_id, *( [brand_id] if brand_id is not None else [] ), start_date, end_date],
             ).fetchone()[0])
             synced_rows = int(self.connection.execute(
                 "SELECT COUNT(*) FROM (SELECT ms.ad_account_connection_id,substr(ms.date,1,10) sync_date "
                 "FROM marketing_spend ms JOIN ad_account_connection ac ON ac.id=ms.ad_account_connection_id "
-                "WHERE ms.workspace_id=? AND ac.active=1 AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=?" +
+                "WHERE ms.workspace_id=? AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=?" +
                 (" AND ms.brand_id=?" if brand_id is not None else "") +
                 " GROUP BY ms.ad_account_connection_id,substr(ms.date,1,10))",
                 [workspace_id, start_date, end_date, *( [brand_id] if brand_id is not None else [] )],
             ).fetchone()[0])
             unconverted = [row[0] for row in self.connection.execute(
                 "SELECT DISTINCT ms.currency FROM marketing_spend ms JOIN ad_account_connection ac ON ac.id=ms.ad_account_connection_id "
-                "WHERE ms.workspace_id=? AND ac.active=1 AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=? AND ms.amount_krw IS NULL" +
+                "WHERE ms.workspace_id=? AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=? AND ms.amount_krw IS NULL" +
                 (" AND ms.brand_id=?" if brand_id is not None else ""),
                 [workspace_id, start_date, end_date, *( [brand_id] if brand_id is not None else [] )],
             )]
             direct_spend_rows = int(self.connection.execute(
                 "SELECT COUNT(*) FROM marketing_spend ms JOIN ad_account_connection ac ON ac.id=ms.ad_account_connection_id "
-                "WHERE ms.workspace_id=? AND ac.active=1 AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=? AND ms.product_id=?",
+                "WHERE ms.workspace_id=? AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=? AND ms.product_id=?",
                 [workspace_id, start_date, end_date, product_id],
             ).fetchone()[0]) if product_id is not None else None
-            expected_sync_rows = days * active_accounts
-            coverage_complete = active_accounts >= 1 and synced_rows == expected_sync_rows
+            expected_sync_rows = days * analysis_accounts
+            coverage_complete = analysis_accounts >= 1 and synced_rows == expected_sync_rows
             currency_complete = not unconverted
             spend_analysis_ready = coverage_complete and currency_complete and (product_id is None or bool(direct_spend_rows))
             available_actual_ad = actual_ad if spend_analysis_ready else None
@@ -523,7 +525,7 @@ class FinanceRepository:
                     "days_expected": expected_sync_rows,
                     "days_synced": synced_rows,
                     "complete": coverage_complete,
-                    "account_count": active_accounts,
+                    "account_count": analysis_accounts,
                 },
                 "currency_complete": currency_complete,
                 "unconverted_currencies": unconverted,
@@ -538,7 +540,7 @@ class FinanceRepository:
             grouped_ads = {int(row["product_id"]): dict(row) for row in self.connection.execute(
                 "SELECT ms.product_id,SUM(ms.amount_krw) amount,COUNT(*) spend_rows FROM marketing_spend ms "
                 "JOIN ad_account_connection ac ON ac.id=ms.ad_account_connection_id AND ac.workspace_id=ms.workspace_id "
-                "WHERE ms.workspace_id=? AND ac.active=1 AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=? AND ms.product_id IS NOT NULL" +
+                "WHERE ms.workspace_id=? AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=? AND ms.product_id IS NOT NULL" +
                 (" AND ms.product_id=?" if product_id is not None else " AND ms.brand_id=?" if brand_id is not None else "") + " GROUP BY ms.product_id",
                 [workspace_id, start_date, end_date, *( [product_id] if product_id is not None else [brand_id] if brand_id is not None else [] )],
             )}
@@ -562,7 +564,7 @@ class FinanceRepository:
             daily_ads = {row["date"]: int(row["amount"] or 0) for row in self.connection.execute(
                 "SELECT substr(ms.date,1,10) date,SUM(ms.amount_krw) amount FROM marketing_spend ms "
                 "JOIN ad_account_connection ac ON ac.id=ms.ad_account_connection_id AND ac.workspace_id=ms.workspace_id "
-                "WHERE ms.workspace_id=? AND ac.active=1 AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=?" + spend_scope + " GROUP BY substr(ms.date,1,10)",
+                "WHERE ms.workspace_id=? AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=?" + spend_scope + " GROUP BY substr(ms.date,1,10)",
                 [workspace_id, start_date, end_date, *spend_params],
             )}
             daily = []
@@ -574,7 +576,7 @@ class FinanceRepository:
             channels = [dict(row) for row in self.connection.execute(
                 "SELECT ms.channel name,SUM(ms.amount_krw) amount FROM marketing_spend ms "
                 "JOIN ad_account_connection ac ON ac.id=ms.ad_account_connection_id AND ac.workspace_id=ms.workspace_id "
-                "WHERE ms.workspace_id=? AND ac.active=1 AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=?" + spend_scope + " GROUP BY ms.channel ORDER BY amount DESC",
+                "WHERE ms.workspace_id=? AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=?" + spend_scope + " GROUP BY ms.channel ORDER BY amount DESC",
                 [workspace_id, start_date, end_date, *spend_params],
             )]
             if not spend_analysis_ready:
