@@ -659,6 +659,7 @@ class FinanceRepository:
             "SELECT s.date, SUM(s.total_selling_amount) sales, SUM(s.net_profit) net_profit, SUM(s.quantity) quantity "
             "FROM sale s WHERE s.workspace_id=?" + clause + " GROUP BY s.date ORDER BY s.date", params,
         )]
+        result["total_quantity"] = sum(int(row["quantity"] or 0) for row in result["daily_sales"])
         result["products"] = [dict(row) for row in self.connection.execute(
             "SELECT p.id, p.name, COUNT(*) count, SUM(s.quantity) quantity, SUM(s.total_selling_amount) sales, SUM(s.net_profit) net_profit "
             "FROM sale s JOIN product p ON p.id=s.product_id WHERE s.workspace_id=?" + clause +
@@ -672,6 +673,40 @@ class FinanceRepository:
         result["operating_profit"] = result["total_net_profit"] - result["total_expenses"]
         result["operating_margin"] = (result["operating_profit"] / result["total_sales"] * 100) if result["total_sales"] else 0
         return result
+
+    def business_date_details(self, workspace_id: int, selected_date: str) -> dict[str, Any]:
+        items = [dict(row) for row in self.connection.execute(
+            "SELECT s.*,p.name product_name,pl.name platform_name FROM sale s "
+            "JOIN product p ON p.id=s.product_id JOIN platform pl ON pl.id=s.platform_id "
+            "WHERE s.workspace_id=? AND substr(s.date,1,10)=? ORDER BY p.name,pl.name,s.id",
+            (workspace_id, selected_date),
+        )]
+        products = [dict(row) for row in self.connection.execute(
+            "SELECT p.id product_id,p.name product_name,SUM(s.quantity) quantity,"
+            "SUM(s.total_selling_amount) sales,SUM(s.net_profit) net_profit "
+            "FROM sale s JOIN product p ON p.id=s.product_id "
+            "WHERE s.workspace_id=? AND substr(s.date,1,10)=? "
+            "GROUP BY p.id,p.name ORDER BY quantity DESC,sales DESC,p.name",
+            (workspace_id, selected_date),
+        )]
+        channels = [dict(row) for row in self.connection.execute(
+            "SELECT s.product_id,pl.id platform_id,pl.name platform_name,SUM(s.quantity) quantity,"
+            "SUM(s.total_selling_amount) sales,SUM(s.net_profit) net_profit "
+            "FROM sale s JOIN platform pl ON pl.id=s.platform_id "
+            "WHERE s.workspace_id=? AND substr(s.date,1,10)=? "
+            "GROUP BY s.product_id,pl.id,pl.name ORDER BY quantity DESC,sales DESC,pl.name",
+            (workspace_id, selected_date),
+        )]
+        for product in products:
+            product["channels"] = [row for row in channels if row["product_id"] == product["product_id"]]
+        return {
+            "date": selected_date,
+            "items": items,
+            "total_quantity": sum(int(row["quantity"] or 0) for row in products),
+            "total_sales": sum(int(row["sales"] or 0) for row in products),
+            "total_profit": sum(int(row["net_profit"] or 0) for row in products),
+            "products": products,
+        }
 
     def ad_analytics(self, workspace_id: int, month: str | None = None, start_date: str | None = None, end_date: str | None = None) -> dict[str, Any]:
         conditions: list[str] = []
