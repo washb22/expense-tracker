@@ -575,6 +575,78 @@ class FinanceApiTest(unittest.TestCase):
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM marketing_allocation").fetchone()[0], 0)
         self.assertEqual(after, before)
 
+    def test_sales_analysis_compares_periods_attribution_and_workspace_scope(self):
+        self.create_workspace(1); self.create_workspace(2, "Other")
+        brand = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "등원한끼"}).json
+        for product_id, name in ((11, "제품 A"), (12, "제품 B")):
+            self.assertEqual(self.request("POST", "/api/sbrocor/finance/v1/products?workspace_id=1", {
+                "id": product_id, "name": name, "cost_price": 10, "brand_id": brand["id"],
+            }).status_code, 201)
+        self.request("POST", "/api/sbrocor/finance/v1/platforms?workspace_id=1", {"id": 21, "name": "자사몰", "commission_rate": 0})
+        sales = (
+            ("a1", "2026-08-01", 11, 10, 1000, 400), ("a2", "2026-08-02", 12, 5, 500, 200),
+            ("b1", "2026-08-10", 11, 15, 1800, 700), ("b2", "2026-08-13", 12, 4, 400, 150),
+        )
+        for sale_id, day, product_id, quantity, revenue, profit in sales:
+            response = self.request("POST", "/api/sbrocor/finance/v1/sales?workspace_id=1", {
+                "id": sale_id, "date": day, "product_id": product_id, "platform_id": 21,
+                "selling_price": revenue // quantity, "quantity": quantity,
+                "total_selling_amount": revenue, "total_cost_amount": revenue - profit,
+                "commission_amount": 0, "net_profit": profit,
+            })
+            self.assertEqual(response.status_code, 201, response.get_data(as_text=True))
+        ads = (
+            ("a-direct", "2026-08-01", 100, 11, "Meta"), ("a-common", "2026-08-02", 50, None, "네이버"),
+            ("a-unallocated", "2026-08-02", 30, "none", None),
+            ("b-direct", "2026-08-10", 200, 11, "Meta"), ("b-common", "2026-08-11", 100, None, "네이버"),
+            ("b-unallocated", "2026-08-12", 50, "none", None),
+        )
+        for transaction_id, day, amount, product_id, channel in ads:
+            self.request("POST", "/api/sbrocor/finance/v1/transactions?workspace_id=1", {
+                "id": transaction_id, "date": day, "merchant": transaction_id, "amount": amount, "category": "광고비",
+            })
+            if product_id != "none":
+                allocation = {"brand_id": brand["id"], "product_id": product_id, "channel": channel, "amount": amount}
+                saved = self.request("PUT", f"/api/sbrocor/finance/v1/transactions/{transaction_id}/marketing-allocations?workspace_id=1", {"allocations": [allocation]})
+                self.assertEqual(saved.status_code, 200, saved.get_data(as_text=True))
+        # Large rows in another workspace must never leak into workspace 1.
+        self.request("POST", "/api/sbrocor/finance/v1/transactions?workspace_id=2", {
+            "id": "other-ad", "date": "2026-08-01", "merchant": "other", "amount": 999999, "category": "광고비",
+        })
+
+        path = ("/api/sbrocor/finance/v1/sales-analysis/compare?workspace_id=1"
+                "&a_start=2026-08-01&a_end=2026-08-02&b_start=2026-08-10&b_end=2026-08-13"
+                f"&brand_id={brand['id']}")
+        response = self.request("GET", path)
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        payload = response.json; a = payload["periods"]["a"]["totals"]; b = payload["periods"]["b"]["totals"]
+        self.assertEqual((a["revenue"], b["revenue"]), (1500, 2200))
+        self.assertEqual((a["quantity"], b["quantity"]), (15, 19))
+        self.assertEqual((a["sales_profit"], b["sales_profit"]), (600, 850))
+        self.assertEqual((a["advertising_cost"], b["advertising_cost"]), (150, 300))
+        self.assertEqual((a["direct_advertising_cost"], a["brand_common_advertising_cost"]), (100, 50))
+        self.assertEqual((a["profit_after_advertising"], b["profit_after_advertising"]), (450, 550))
+        self.assertEqual((a["unallocated_advertising_cost"], b["unallocated_advertising_cost"]), (30, 50))
+        self.assertAlmostEqual(a["classification_rate"], 150 / 180 * 100)
+        self.assertEqual((a["days"], b["days"]), (2, 4))
+        self.assertEqual((a["daily_average_revenue"], b["daily_average_revenue"]), (750, 550))
+        self.assertEqual(len(payload["periods"]["b"]["daily"]), 4)
+        self.assertEqual({item["name"]: item["amount"] for item in payload["periods"]["a"]["channels"]}, {"Meta": 100, "네이버": 50})
+        product_a = next(item for item in payload["products"] if item["id"] == 11)
+        self.assertEqual(product_a["periods"]["a"]["direct_advertising_cost"], 100)
+        self.assertEqual(product_a["periods"]["b"]["profit_after_advertising"], 500)
+
+        product_path = path + "&product_id=11"
+        product_payload = self.request("GET", product_path).json
+        product_a_totals = product_payload["periods"]["a"]["totals"]
+        self.assertEqual(product_a_totals["advertising_cost"], 100)
+        self.assertEqual(product_a_totals["brand_common_advertising_cost"], 50)
+        self.assertEqual(product_a_totals["profit_after_advertising"], 300)
+
+        employee = {"actor_uid": "employee", "role": "employee", "workspace_ids": [2], "permissions": ["business_dashboard"]}
+        denied = self.request("GET", path, context=employee)
+        self.assertEqual(denied.status_code, 403)
+
 
 if __name__ == "__main__":
     unittest.main()

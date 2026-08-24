@@ -297,6 +297,31 @@ def marketing_allocation_summary():
         ))
 
 
+@finance_blueprint.get("/sales-analysis/compare")
+@require_server_hmac
+def sales_analysis_compare():
+    workspace_id = _workspace_id(); _authorize("business_dashboard", workspace_id)
+    periods = {}
+    for key in ("a", "b"):
+        start_value = request.args.get(f"{key}_start")
+        end_value = request.args.get(f"{key}_end")
+        if not start_value or not end_value:
+            raise ValueError(f"period {key.upper()} start and end are required")
+        try:
+            start = date.fromisoformat(start_value); end = date.fromisoformat(end_value)
+        except ValueError as error:
+            raise ValueError("comparison dates must be YYYY-MM-DD") from error
+        if start > end:
+            raise ValueError(f"period {key.upper()} start must be on or before end")
+        periods[key] = (start.isoformat(), end.isoformat())
+    brand_id = request.args.get("brand_id", type=int)
+    product_id = request.args.get("product_id", type=int)
+    with finance_connection() as connection:
+        repository = FinanceRepository(connection)
+        FinanceService(repository).require_workspace(workspace_id)
+        return jsonify(repository.sales_analysis_compare(workspace_id, periods, brand_id, product_id))
+
+
 @finance_blueprint.post("/transactions/import")
 @require_server_hmac
 def import_transactions():

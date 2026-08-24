@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 import uuid
 import math
+from datetime import date, timedelta
 from typing import Any, Iterable
 
 MARKETING_CHANNELS = ("Meta", "네이버", "Google", "카카오", "바이럴", "인플루언서", "체험단", "대행사", "기타")
@@ -351,6 +352,164 @@ class FinanceRepository:
             "brands": brands,
             "channels": channels,
             "products": products,
+        }
+
+    def sales_analysis_compare(
+        self, workspace_id: int, periods: dict[str, tuple[str, str]],
+        brand_id: int | None = None, product_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Aggregate sales and attributed accounting ad cost for two periods."""
+        brand = None
+        if brand_id is not None:
+            brand = self.connection.execute(
+                "SELECT id,name FROM brand WHERE id=? AND workspace_id=?", (brand_id, workspace_id)
+            ).fetchone()
+            if not brand:
+                raise ValueError("brand must belong to the workspace")
+        product = None
+        if product_id is not None:
+            product = self.connection.execute(
+                "SELECT id,name,brand_id FROM product WHERE id=? AND workspace_id=?", (product_id, workspace_id)
+            ).fetchone()
+            if not product:
+                raise ValueError("product must belong to the workspace")
+            if product["brand_id"] is None:
+                raise ValueError("analysis product must have a brand")
+            if brand_id is not None and int(product["brand_id"]) != brand_id:
+                raise ValueError("product does not belong to the selected brand")
+            if brand_id is None:
+                brand_id = int(product["brand_id"])
+                brand = self.connection.execute(
+                    "SELECT id,name FROM brand WHERE id=? AND workspace_id=?", (brand_id, workspace_id)
+                ).fetchone()
+
+        product_scope = ""
+        scope_params: list[Any] = []
+        if product_id is not None:
+            product_scope = " AND s.product_id=?"; scope_params.append(product_id)
+        elif brand_id is not None:
+            product_scope = " AND p.brand_id=?"; scope_params.append(brand_id)
+
+        allocation_scope = ""
+        allocation_params: list[Any] = []
+        if product_id is not None:
+            allocation_scope = " AND a.product_id=?"; allocation_params.append(product_id)
+        elif brand_id is not None:
+            allocation_scope = " AND a.brand_id=?"; allocation_params.append(brand_id)
+
+        product_rows = [dict(row) for row in self.connection.execute(
+            "SELECT p.id,p.name,p.brand_id,b.name brand_name FROM product p "
+            "LEFT JOIN brand b ON b.id=p.brand_id AND b.workspace_id=p.workspace_id "
+            "WHERE p.workspace_id=?" +
+            (" AND p.id=?" if product_id is not None else " AND p.brand_id=?" if brand_id is not None else "") +
+            " ORDER BY p.name,p.id", (workspace_id, *( [product_id] if product_id is not None else [brand_id] if brand_id is not None else [] )),
+        )]
+        products_by_id = {int(row["id"]): {**row, "periods": {}} for row in product_rows}
+        result_periods: dict[str, Any] = {}
+
+        for key, (start_date, end_date) in periods.items():
+            sale_params = [workspace_id, start_date, end_date, *scope_params]
+            total_row = dict(self.connection.execute(
+                "SELECT COALESCE(SUM(s.total_selling_amount),0) revenue,COALESCE(SUM(s.quantity),0) quantity,"
+                "COALESCE(SUM(s.net_profit),0) sales_profit FROM sale s JOIN product p ON p.id=s.product_id AND p.workspace_id=s.workspace_id "
+                "WHERE s.workspace_id=? AND substr(s.date,1,10)>=? AND substr(s.date,1,10)<=?" + product_scope,
+                sale_params,
+            ).fetchone())
+            allocated_ad = int(self.connection.execute(
+                "SELECT COALESCE(SUM(a.amount),0) FROM marketing_allocation a "
+                "JOIN finance_transaction t ON t.id=a.transaction_id AND t.workspace_id=a.workspace_id "
+                "WHERE t.workspace_id=? AND t.category='광고비' AND substr(t.date,1,10)>=? AND substr(t.date,1,10)<=?" + allocation_scope,
+                [workspace_id, start_date, end_date, *allocation_params],
+            ).fetchone()[0])
+            direct_ad = int(self.connection.execute(
+                "SELECT COALESCE(SUM(a.amount),0) FROM marketing_allocation a "
+                "JOIN finance_transaction t ON t.id=a.transaction_id AND t.workspace_id=a.workspace_id "
+                "WHERE t.workspace_id=? AND t.category='광고비' AND substr(t.date,1,10)>=? AND substr(t.date,1,10)<=? AND a.product_id IS NOT NULL" +
+                (" AND a.product_id=?" if product_id is not None else " AND a.brand_id=?" if brand_id is not None else ""),
+                [workspace_id, start_date, end_date, *( [product_id] if product_id is not None else [brand_id] if brand_id is not None else [] )],
+            ).fetchone()[0])
+            brand_common_ad = int(self.connection.execute(
+                "SELECT COALESCE(SUM(a.amount),0) FROM marketing_allocation a "
+                "JOIN finance_transaction t ON t.id=a.transaction_id AND t.workspace_id=a.workspace_id "
+                "WHERE t.workspace_id=? AND t.category='광고비' AND substr(t.date,1,10)>=? AND substr(t.date,1,10)<=? AND a.product_id IS NULL" +
+                (" AND a.brand_id=?" if brand_id is not None else ""),
+                [workspace_id, start_date, end_date, *( [brand_id] if brand_id is not None else [] )],
+            ).fetchone()[0])
+            if product_id is not None:
+                allocated_ad = direct_ad
+            total_ad = int(self.connection.execute(
+                "SELECT COALESCE(SUM(amount),0) FROM finance_transaction WHERE workspace_id=? AND category='광고비' "
+                "AND substr(date,1,10)>=? AND substr(date,1,10)<=?", (workspace_id, start_date, end_date),
+            ).fetchone()[0])
+            all_allocated = int(self.connection.execute(
+                "SELECT COALESCE(SUM(a.amount),0) FROM marketing_allocation a JOIN finance_transaction t "
+                "ON t.id=a.transaction_id AND t.workspace_id=a.workspace_id WHERE t.workspace_id=? AND t.category='광고비' "
+                "AND substr(t.date,1,10)>=? AND substr(t.date,1,10)<=?", (workspace_id, start_date, end_date),
+            ).fetchone()[0])
+            days = (date.fromisoformat(end_date) - date.fromisoformat(start_date)).days + 1
+            total_row.update({
+                "advertising_cost": allocated_ad,
+                "direct_advertising_cost": direct_ad,
+                "brand_common_advertising_cost": brand_common_ad,
+                "profit_after_advertising": int(total_row["sales_profit"]) - allocated_ad,
+                "total_advertising_cost": total_ad,
+                "allocated_advertising_cost": all_allocated,
+                "unallocated_advertising_cost": max(total_ad - all_allocated, 0),
+                "classification_rate": (all_allocated / total_ad * 100) if total_ad else 100.0,
+                "days": days,
+                "daily_average_revenue": total_row["revenue"] / days,
+                "daily_average_quantity": total_row["quantity"] / days,
+                "daily_average_advertising_cost": allocated_ad / days,
+            })
+
+            grouped_sales = {int(row["product_id"]): dict(row) for row in self.connection.execute(
+                "SELECT s.product_id,COALESCE(SUM(s.total_selling_amount),0) revenue,COALESCE(SUM(s.quantity),0) quantity,"
+                "COALESCE(SUM(s.net_profit),0) sales_profit FROM sale s JOIN product p ON p.id=s.product_id AND p.workspace_id=s.workspace_id "
+                "WHERE s.workspace_id=? AND substr(s.date,1,10)>=? AND substr(s.date,1,10)<=?" + product_scope + " GROUP BY s.product_id",
+                sale_params,
+            )}
+            grouped_ads = {int(row["product_id"]): int(row["amount"]) for row in self.connection.execute(
+                "SELECT a.product_id,SUM(a.amount) amount FROM marketing_allocation a JOIN finance_transaction t "
+                "ON t.id=a.transaction_id AND t.workspace_id=a.workspace_id WHERE t.workspace_id=? AND t.category='광고비' "
+                "AND substr(t.date,1,10)>=? AND substr(t.date,1,10)<=? AND a.product_id IS NOT NULL" +
+                (" AND a.product_id=?" if product_id is not None else " AND a.brand_id=?" if brand_id is not None else "") + " GROUP BY a.product_id",
+                [workspace_id, start_date, end_date, *( [product_id] if product_id is not None else [brand_id] if brand_id is not None else [] )],
+            )}
+            for item_id, item in products_by_id.items():
+                values = grouped_sales.get(item_id, {"revenue": 0, "quantity": 0, "sales_profit": 0})
+                direct = grouped_ads.get(item_id, 0)
+                item["periods"][key] = {**values, "direct_advertising_cost": direct, "profit_after_advertising": int(values["sales_profit"]) - direct}
+
+            daily_sales = {row["date"]: dict(row) for row in self.connection.execute(
+                "SELECT substr(s.date,1,10) date,SUM(s.total_selling_amount) revenue,SUM(s.quantity) quantity "
+                "FROM sale s JOIN product p ON p.id=s.product_id AND p.workspace_id=s.workspace_id WHERE s.workspace_id=? "
+                "AND substr(s.date,1,10)>=? AND substr(s.date,1,10)<=?" + product_scope + " GROUP BY substr(s.date,1,10)", sale_params,
+            )}
+            daily_ads = {row["date"]: int(row["amount"]) for row in self.connection.execute(
+                "SELECT substr(t.date,1,10) date,SUM(a.amount) amount FROM marketing_allocation a JOIN finance_transaction t "
+                "ON t.id=a.transaction_id AND t.workspace_id=a.workspace_id WHERE t.workspace_id=? AND t.category='광고비' "
+                "AND substr(t.date,1,10)>=? AND substr(t.date,1,10)<=?" + allocation_scope + " GROUP BY substr(t.date,1,10)",
+                [workspace_id, start_date, end_date, *allocation_params],
+            )}
+            daily = []
+            cursor = date.fromisoformat(start_date); final = date.fromisoformat(end_date)
+            while cursor <= final:
+                day = cursor.isoformat(); sales = daily_sales.get(day, {})
+                daily.append({"date": day, "revenue": int(sales.get("revenue", 0)), "quantity": int(sales.get("quantity", 0)), "advertising_cost": daily_ads.get(day, 0)})
+                cursor += timedelta(days=1)
+            channels = [dict(row) for row in self.connection.execute(
+                "SELECT a.channel name,SUM(a.amount) amount FROM marketing_allocation a JOIN finance_transaction t "
+                "ON t.id=a.transaction_id AND t.workspace_id=a.workspace_id WHERE t.workspace_id=? AND t.category='광고비' "
+                "AND substr(t.date,1,10)>=? AND substr(t.date,1,10)<=?" + allocation_scope + " GROUP BY a.channel ORDER BY amount DESC",
+                [workspace_id, start_date, end_date, *allocation_params],
+            )]
+            result_periods[key] = {"start_date": start_date, "end_date": end_date, "totals": total_row, "daily": daily, "channels": channels}
+
+        return {
+            "workspace_id": workspace_id,
+            "filters": {"brand_id": brand_id, "brand_name": brand["name"] if brand else None, "product_id": product_id, "product_name": product["name"] if product else None},
+            "periods": result_periods,
+            "products": list(products_by_id.values()),
         }
 
     def import_if_empty(self, workspace_id: int, data: dict[str, Any]) -> dict[str, int]:
