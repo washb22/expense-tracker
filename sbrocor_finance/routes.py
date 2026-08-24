@@ -182,8 +182,9 @@ def business_date_details():
     workspace_id = _workspace_id(); _authorize("business_dashboard", workspace_id); selected = request.args.get("date")
     if not selected: raise ValueError("date is required")
     with finance_connection() as connection:
-        items = [dict(row) for row in connection.execute("SELECT s.*,p.name product_name,pl.name platform_name FROM sale s JOIN product p ON p.id=s.product_id JOIN platform pl ON pl.id=s.platform_id WHERE s.workspace_id=? AND s.date=? ORDER BY p.name,pl.name", (workspace_id, selected))]
-        return jsonify(date=selected, items=items, total_quantity=sum(int(row["quantity"]) for row in items), total_sales=sum(int(row["total_selling_amount"]) for row in items), total_profit=sum(int(row["net_profit"]) for row in items))
+        repository = FinanceRepository(connection)
+        FinanceService(repository).require_workspace(workspace_id)
+        return jsonify(repository.business_date_details(workspace_id, selected))
 
 
 @finance_blueprint.get("/ads/analytics")

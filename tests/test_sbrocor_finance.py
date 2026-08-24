@@ -283,6 +283,57 @@ class FinanceApiTest(unittest.TestCase):
         self.assertEqual(dashboard["total_expenses"], 100000)
         self.assertEqual(business["operating_profit"], 600000)
 
+    def test_business_daily_sales_aggregates_products_channels_and_workspace(self):
+        self.create_workspace(1)
+        self.create_workspace(2)
+        for product in (
+            {"workspace": 1, "id": 11, "name": "식이섬균", "cost_price": 100},
+            {"workspace": 1, "id": 12, "name": "배도라지즙", "cost_price": 200},
+            {"workspace": 2, "id": 21, "name": "다른 사업장 제품", "cost_price": 300},
+        ):
+            self.request("POST", f"/api/sbrocor/finance/v1/products?workspace_id={product['workspace']}", {
+                "id": product["id"], "name": product["name"], "cost_price": product["cost_price"],
+            })
+        for platform in (
+            {"workspace": 1, "id": 11, "name": "스마트스토어"},
+            {"workspace": 1, "id": 12, "name": "카페24"},
+            {"workspace": 2, "id": 21, "name": "다른 채널"},
+        ):
+            self.request("POST", f"/api/sbrocor/finance/v1/platforms?workspace_id={platform['workspace']}", {
+                "id": platform["id"], "name": platform["name"], "commission_rate": 0,
+            })
+        sales = (
+            {"id": "a", "workspace": 1, "date": "2026-08-24", "product_id": 11, "platform_id": 11, "quantity": 2, "amount": 2000, "profit": 1600},
+            {"id": "b", "workspace": 1, "date": "2026-08-24", "product_id": 11, "platform_id": 12, "quantity": 3, "amount": 3300, "profit": 2700},
+            {"id": "c", "workspace": 1, "date": "2026-08-24", "product_id": 12, "platform_id": 11, "quantity": 1, "amount": 1500, "profit": 1200},
+            {"id": "older", "workspace": 1, "date": "2026-08-23", "product_id": 11, "platform_id": 11, "quantity": 9, "amount": 9000, "profit": 7000},
+            {"id": "isolated", "workspace": 2, "date": "2026-08-24", "product_id": 21, "platform_id": 21, "quantity": 99, "amount": 99000, "profit": 90000},
+        )
+        for sale in sales:
+            self.request("POST", f"/api/sbrocor/finance/v1/sales?workspace_id={sale['workspace']}", {
+                "id": sale["id"], "date": sale["date"], "product_id": sale["product_id"], "platform_id": sale["platform_id"],
+                "selling_price": sale["amount"], "quantity": sale["quantity"], "total_selling_amount": sale["amount"],
+                "total_cost_amount": 0, "commission_amount": 0, "net_profit": sale["profit"],
+            })
+
+        details = self.request("GET", "/api/sbrocor/finance/v1/business/date-details?workspace_id=1&date=2026-08-24")
+        self.assertEqual(details.status_code, 200, details.get_data(as_text=True))
+        self.assertEqual(len(details.json["items"]), 3)
+        self.assertEqual((details.json["total_quantity"], details.json["total_sales"], details.json["total_profit"]), (6, 6800, 5500))
+        self.assertEqual([row["product_name"] for row in details.json["products"]], ["식이섬균", "배도라지즙"])
+        self.assertEqual(details.json["products"][0]["quantity"], 5)
+        self.assertEqual(details.json["products"][0]["sales"], 5300)
+        self.assertEqual(details.json["products"][0]["net_profit"], 4300)
+        self.assertEqual([row["platform_name"] for row in details.json["products"][0]["channels"]], ["카페24", "스마트스토어"])
+        self.assertEqual(sum(row["quantity"] for row in details.json["products"][0]["channels"]), 5)
+
+        period = self.request("GET", "/api/sbrocor/finance/v1/business?workspace_id=1&start_date=2026-08-23&end_date=2026-08-24")
+        self.assertEqual(period.json["total_quantity"], 15)
+        self.assertEqual([row["date"] for row in period.json["daily_sales"]], ["2026-08-23", "2026-08-24"])
+        isolated = self.request("GET", "/api/sbrocor/finance/v1/business/date-details?workspace_id=2&date=2026-08-24")
+        self.assertEqual((isolated.json["total_quantity"], isolated.json["total_sales"]), (99, 99000))
+        self.assertNotIn("식이섬균", isolated.get_data(as_text=True))
+
     def test_server_pagination_filters_and_analytics(self):
         self.create_workspace(1)
         for index in range(5):
