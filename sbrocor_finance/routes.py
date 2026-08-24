@@ -566,11 +566,35 @@ def sync_ad_account(connection_id: int):
         if account["platform"] != "meta": raise ValueError("sync is not implemented for this platform")
         token = _credential_token(account, workspace_id)
         if not token: return jsonify(error="meta_token_not_configured"), 503
-        response = requests.get(f"https://graph.facebook.com/v23.0/{account['account_id']}/insights", params={
+        next_url = f"https://graph.facebook.com/v23.0/{account['account_id']}/insights"
+        next_params = {
             "access_token": token, "level": "ad", "time_range": f'{{"since":"{start}","until":"{end}"}}',
             "time_increment": 1, "fields": "date_start,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,impressions,clicks,ctr,cpc,cpm,actions,action_values", "limit": 5000,
-        }, timeout=60)
-        response.raise_for_status(); items = response.json().get("data", [])
+        }
+        items: list[dict] = []
+        visited_pages: set[str] = set()
+        for _page_number in range(100):
+            if next_url in visited_pages:
+                raise ValueError("Meta pagination loop detected")
+            visited_pages.add(next_url)
+            response = requests.get(next_url, params=next_params, timeout=60)
+            response.raise_for_status()
+            page = response.json()
+            page_items = page.get("data", [])
+            if not isinstance(page_items, list):
+                raise ValueError("Meta response data must be a list")
+            items.extend(page_items)
+            if len(items) > 100000:
+                raise ValueError("Meta sync row limit exceeded")
+            next_page = page.get("paging", {}).get("next")
+            if not next_page:
+                break
+            if not isinstance(next_page, str):
+                raise ValueError("Meta pagination URL is invalid")
+            next_url = next_page
+            next_params = None
+        else:
+            raise ValueError("Meta pagination page limit exceeded")
         daily_spend: dict[str, float] = {}
         try:
             connection.execute("BEGIN IMMEDIATE")

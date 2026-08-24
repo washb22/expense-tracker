@@ -474,9 +474,11 @@ class FinanceRepository:
                 [workspace_id, *( [brand_id] if brand_id is not None else [] )],
             ).fetchone()[0])
             synced_rows = int(self.connection.execute(
-                "SELECT COUNT(*) FROM marketing_spend ms JOIN ad_account_connection ac ON ac.id=ms.ad_account_connection_id "
+                "SELECT COUNT(*) FROM (SELECT ms.ad_account_connection_id,substr(ms.date,1,10) sync_date "
+                "FROM marketing_spend ms JOIN ad_account_connection ac ON ac.id=ms.ad_account_connection_id "
                 "WHERE ms.workspace_id=? AND ac.active=1 AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=?" +
-                (" AND ms.brand_id=?" if brand_id is not None else ""),
+                (" AND ms.brand_id=?" if brand_id is not None else "") +
+                " GROUP BY ms.ad_account_connection_id,substr(ms.date,1,10))",
                 [workspace_id, start_date, end_date, *( [brand_id] if brand_id is not None else [] )],
             ).fetchone()[0])
             unconverted = [row[0] for row in self.connection.execute(
@@ -485,14 +487,25 @@ class FinanceRepository:
                 (" AND ms.brand_id=?" if brand_id is not None else ""),
                 [workspace_id, start_date, end_date, *( [brand_id] if brand_id is not None else [] )],
             )]
+            direct_spend_rows = int(self.connection.execute(
+                "SELECT COUNT(*) FROM marketing_spend ms JOIN ad_account_connection ac ON ac.id=ms.ad_account_connection_id "
+                "WHERE ms.workspace_id=? AND ac.active=1 AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=? AND ms.product_id=?",
+                [workspace_id, start_date, end_date, product_id],
+            ).fetchone()[0]) if product_id is not None else None
             expected_sync_rows = days * active_accounts
+            coverage_complete = active_accounts >= 1 and synced_rows == expected_sync_rows
+            currency_complete = not unconverted
+            spend_analysis_ready = coverage_complete and currency_complete and (product_id is None or bool(direct_spend_rows))
+            available_actual_ad = actual_ad if spend_analysis_ready else None
+            available_direct_ad = direct_ad if spend_analysis_ready else None
+            available_brand_common_ad = brand_common_ad if spend_analysis_ready else None
             total_row.update({
-                "advertising_cost": actual_ad,
-                "actual_advertising_spend": actual_ad,
+                "advertising_cost": available_actual_ad,
+                "actual_advertising_spend": available_actual_ad,
                 "paid_advertising_cost": paid_allocated if (brand_id is not None or product_id is not None) else total_ad,
-                "direct_advertising_cost": direct_ad,
-                "brand_common_advertising_cost": brand_common_ad,
-                "profit_after_advertising": int(total_row["sales_profit"]) - actual_ad,
+                "direct_advertising_cost": available_direct_ad,
+                "brand_common_advertising_cost": available_brand_common_ad,
+                "profit_after_advertising": int(total_row["sales_profit"]) - actual_ad if spend_analysis_ready else None,
                 "total_advertising_cost": total_ad,
                 "allocated_advertising_cost": all_allocated,
                 "unallocated_advertising_cost": max(total_ad - all_allocated, 0),
@@ -500,16 +513,19 @@ class FinanceRepository:
                 "days": days,
                 "daily_average_revenue": total_row["revenue"] / days,
                 "daily_average_quantity": total_row["quantity"] / days,
-                "daily_average_advertising_cost": actual_ad / days,
-                "revenue_per_ad_won": (total_row["revenue"] / actual_ad) if actual_ad else None,
-                "quantity_per_10000_ad_spend": (total_row["quantity"] / actual_ad * 10000) if actual_ad else None,
+                "daily_average_advertising_cost": actual_ad / days if spend_analysis_ready else None,
+                "revenue_per_ad_won": (total_row["revenue"] / actual_ad) if spend_analysis_ready and actual_ad else None,
+                "quantity_per_10000_ad_spend": (total_row["quantity"] / actual_ad * 10000) if spend_analysis_ready and actual_ad else None,
+                "spend_analysis_ready": spend_analysis_ready,
                 "spend_coverage": {
+                    "account_days_expected": expected_sync_rows,
+                    "account_days_synced": synced_rows,
                     "days_expected": expected_sync_rows,
                     "days_synced": synced_rows,
-                    "complete": expected_sync_rows > 0 and synced_rows == expected_sync_rows,
+                    "complete": coverage_complete,
                     "account_count": active_accounts,
                 },
-                "currency_complete": not unconverted,
+                "currency_complete": currency_complete,
                 "unconverted_currencies": unconverted,
             })
 
@@ -530,11 +546,12 @@ class FinanceRepository:
                 values = grouped_sales.get(item_id, {"revenue": 0, "quantity": 0, "sales_profit": 0})
                 spend = grouped_ads.get(item_id)
                 direct = int(spend["amount"] or 0) if spend else 0
+                direct_available = spend_analysis_ready and bool(spend and spend["spend_rows"])
                 item["periods"][key] = {
                     **values,
-                    "direct_advertising_cost": direct,
-                    "direct_advertising_available": bool(spend and spend["spend_rows"]),
-                    "profit_after_advertising": int(values["sales_profit"]) - direct,
+                    "direct_advertising_cost": direct if direct_available else None,
+                    "direct_advertising_available": direct_available,
+                    "profit_after_advertising": int(values["sales_profit"]) - direct if direct_available else None,
                 }
 
             daily_sales = {row["date"]: dict(row) for row in self.connection.execute(
@@ -552,7 +569,7 @@ class FinanceRepository:
             cursor = date.fromisoformat(start_date); final = date.fromisoformat(end_date)
             while cursor <= final:
                 day = cursor.isoformat(); sales = daily_sales.get(day, {})
-                daily.append({"date": day, "revenue": int(sales.get("revenue", 0)), "quantity": int(sales.get("quantity", 0)), "advertising_cost": daily_ads.get(day, 0)})
+                daily.append({"date": day, "revenue": int(sales.get("revenue", 0)), "quantity": int(sales.get("quantity", 0)), "advertising_cost": daily_ads.get(day, 0) if spend_analysis_ready else None})
                 cursor += timedelta(days=1)
             channels = [dict(row) for row in self.connection.execute(
                 "SELECT ms.channel name,SUM(ms.amount_krw) amount FROM marketing_spend ms "
@@ -560,6 +577,8 @@ class FinanceRepository:
                 "WHERE ms.workspace_id=? AND ac.active=1 AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=?" + spend_scope + " GROUP BY ms.channel ORDER BY amount DESC",
                 [workspace_id, start_date, end_date, *spend_params],
             )]
+            if not spend_analysis_ready:
+                channels = []
             result_periods[key] = {"start_date": start_date, "end_date": end_date, "totals": total_row, "daily": daily, "channels": channels}
 
         return {

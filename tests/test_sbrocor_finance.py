@@ -750,6 +750,8 @@ class FinanceApiTest(unittest.TestCase):
                 ("a-common", "2026-08-02", 50, None, "네이버"),
                 ("b-direct", "2026-08-10", 200, 11, "Meta"),
                 ("b-common", "2026-08-11", 100, None, "네이버"),
+                ("b-zero-12", "2026-08-12", 0, None, "Meta"),
+                ("b-zero-13", "2026-08-13", 0, None, "Meta"),
             ):
                 connection.execute(
                     """INSERT INTO marketing_spend
@@ -784,8 +786,11 @@ class FinanceApiTest(unittest.TestCase):
         self.assertEqual(len(payload["periods"]["b"]["daily"]), 4)
         self.assertEqual({item["name"]: item["amount"] for item in payload["periods"]["a"]["channels"]}, {"Meta": 100, "네이버": 50})
         product_a = next(item for item in payload["products"] if item["id"] == 11)
+        product_b = next(item for item in payload["products"] if item["id"] == 12)
         self.assertEqual(product_a["periods"]["a"]["direct_advertising_cost"], 100)
         self.assertEqual(product_a["periods"]["b"]["profit_after_advertising"], 500)
+        self.assertFalse(product_b["periods"]["a"]["direct_advertising_available"])
+        self.assertIsNone(product_b["periods"]["a"]["profit_after_advertising"])
 
         product_path = path + "&product_id=11"
         product_payload = self.request("GET", product_path).json
@@ -793,6 +798,9 @@ class FinanceApiTest(unittest.TestCase):
         self.assertEqual(product_a_totals["advertising_cost"], 100)
         self.assertEqual(product_a_totals["brand_common_advertising_cost"], 50)
         self.assertEqual(product_a_totals["profit_after_advertising"], 300)
+        product_b_payload = self.request("GET", path + "&product_id=12").json
+        self.assertFalse(product_b_payload["periods"]["a"]["totals"]["spend_analysis_ready"])
+        self.assertIsNone(product_b_payload["periods"]["a"]["totals"]["profit_after_advertising"])
 
         employee = {"actor_uid": "employee", "role": "employee", "workspace_ids": [2], "permissions": ["business_dashboard"]}
         denied = self.request("GET", path, context=employee)
@@ -904,7 +912,11 @@ class FinanceApiTest(unittest.TestCase):
         self.assertEqual(a["actual_advertising_spend"], 300000)
         self.assertEqual(b["actual_advertising_spend"], 700000)
         self.assertEqual(workspace["paid_advertising_cost"], 123000)
-        self.assertEqual(workspace["spend_coverage"], {"days_expected": 4, "days_synced": 4, "complete": True, "account_count": 2})
+        self.assertEqual(workspace["spend_coverage"], {
+            "account_days_expected": 4, "account_days_synced": 4,
+            "days_expected": 4, "days_synced": 4, "complete": True, "account_count": 2,
+        })
+        self.assertTrue(workspace["spend_analysis_ready"])
         self.assertEqual(workspace["revenue_per_ad_won"], 0)
         self.assertEqual(workspace["quantity_per_10000_ad_spend"], 0)
 
@@ -933,7 +945,91 @@ class FinanceApiTest(unittest.TestCase):
         totals = self.request("GET", path).json["periods"]["a"]["totals"]
         self.assertTrue(totals["spend_coverage"]["complete"])
         self.assertFalse(totals["currency_complete"])
+        self.assertFalse(totals["spend_analysis_ready"])
+        self.assertIsNone(totals["actual_advertising_spend"])
+        self.assertIsNone(totals["profit_after_advertising"])
         self.assertEqual(totals["unconverted_currencies"], ["USD"])
+
+    def test_sales_analysis_is_unavailable_without_accounts_or_complete_coverage(self):
+        self.create_workspace(1)
+        path = ("/api/sbrocor/finance/v1/sales-analysis/compare?workspace_id=1"
+                "&a_start=2026-08-01&a_end=2026-08-02&b_start=2026-08-01&b_end=2026-08-02")
+        no_account = self.request("GET", path).json["periods"]["a"]["totals"]
+        self.assertFalse(no_account["spend_analysis_ready"])
+        self.assertFalse(no_account["spend_coverage"]["complete"])
+        self.assertIsNone(no_account["actual_advertising_spend"])
+        self.assertIsNone(no_account["profit_after_advertising"])
+
+        brand = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "브랜드"}).json
+        with patch.dict(os.environ, {"SBROCOR_META_ACCESS_TOKEN_INCOMPLETE": "server-secret"}, clear=False):
+            account = self.request("POST", "/api/sbrocor/finance/v1/ad-accounts?workspace_id=1", {
+                "brand_id": brand["id"], "platform": "meta", "account_id": "act_incomplete",
+                "account_name": "불완전", "currency": "KRW", "credential_key": "INCOMPLETE",
+            }).json
+        with closing(connect()) as connection:
+            connection.execute(
+                "INSERT INTO marketing_spend(workspace_id,ad_account_connection_id,brand_id,date,channel,original_amount,currency,amount_krw,source,external_key) VALUES (1,?,?,?,'Meta',100,'KRW',100,'test','partial')",
+                (account["id"], brand["id"], "2026-08-01"),
+            )
+            connection.commit()
+        incomplete = self.request("GET", path).json["periods"]["a"]["totals"]
+        self.assertEqual(incomplete["spend_coverage"]["account_days_expected"], 2)
+        self.assertEqual(incomplete["spend_coverage"]["account_days_synced"], 1)
+        self.assertFalse(incomplete["spend_analysis_ready"])
+        self.assertIsNone(incomplete["actual_advertising_spend"])
+
+    def test_meta_sync_follows_all_pages_and_remains_idempotent(self):
+        self.create_workspace(1)
+        brand = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "페이지 브랜드"}).json
+        with patch.dict(os.environ, {"SBROCOR_META_ACCESS_TOKEN_PAGED": "server-secret"}, clear=False):
+            account = self.request("POST", "/api/sbrocor/finance/v1/ad-accounts?workspace_id=1", {
+                "brand_id": brand["id"], "platform": "meta", "account_id": "act_paged",
+                "account_name": "페이지 계정", "currency": "KRW", "credential_key": "PAGED",
+            }).json
+            class FakeResponse:
+                def __init__(self, payload): self.payload = payload
+                def raise_for_status(self): return None
+                def json(self): return self.payload
+            def fake_get(url, **_kwargs):
+                if url == "https://meta.example/page-2":
+                    return FakeResponse({"data": [{"date_start": "2026-08-01", "ad_id": "page-2", "spend": "200000"}]})
+                return FakeResponse({
+                    "data": [{"date_start": "2026-08-01", "ad_id": "page-1", "spend": "100000"}],
+                    "paging": {"next": "https://meta.example/page-2"},
+                })
+            payload = {"start_date": "2026-08-01", "end_date": "2026-08-01"}
+            with patch("sbrocor_finance.routes.requests.get", side_effect=fake_get):
+                first = self.request("POST", f"/api/sbrocor/finance/v1/ad-accounts/{account['id']}/sync?workspace_id=1", payload)
+                second = self.request("POST", f"/api/sbrocor/finance/v1/ad-accounts/{account['id']}/sync?workspace_id=1", payload)
+        self.assertEqual((first.status_code, second.status_code), (200, 200))
+        self.assertEqual(first.json["raw_saved"], 2)
+        with closing(connect()) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM ad_spend").fetchone()[0], 2)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM marketing_spend").fetchone()[0], 1)
+            self.assertEqual(connection.execute("SELECT SUM(amount_krw) FROM marketing_spend").fetchone()[0], 300000)
+
+    def test_meta_sync_page_failure_does_not_record_partial_completion(self):
+        self.create_workspace(1)
+        brand = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "실패 브랜드"}).json
+        with patch.dict(os.environ, {"SBROCOR_META_ACCESS_TOKEN_FAILPAGE": "server-secret"}, clear=False):
+            account = self.request("POST", "/api/sbrocor/finance/v1/ad-accounts?workspace_id=1", {
+                "brand_id": brand["id"], "platform": "meta", "account_id": "act_failpage",
+                "account_name": "실패 계정", "currency": "KRW", "credential_key": "FAILPAGE",
+            }).json
+            class FirstPage:
+                def raise_for_status(self): return None
+                def json(self): return {"data": [{"date_start": "2026-08-01", "ad_id": "partial", "spend": "100000"}], "paging": {"next": "https://meta.example/fail"}}
+            def fake_get(url, **_kwargs):
+                if url == "https://meta.example/fail":
+                    raise RuntimeError("simulated page failure")
+                return FirstPage()
+            with patch("sbrocor_finance.routes.requests.get", side_effect=fake_get):
+                with self.assertRaisesRegex(RuntimeError, "simulated page failure"):
+                    self.request("POST", f"/api/sbrocor/finance/v1/ad-accounts/{account['id']}/sync?workspace_id=1", {"start_date": "2026-08-01", "end_date": "2026-08-01"})
+        with closing(connect()) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM ad_spend").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM marketing_spend").fetchone()[0], 0)
+            self.assertIsNone(connection.execute("SELECT last_synced_at FROM ad_account_connection WHERE id=?", (account["id"],)).fetchone()[0])
 
 
 if __name__ == "__main__":
