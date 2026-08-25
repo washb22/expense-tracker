@@ -11,7 +11,7 @@ from typing import Iterator
 from .config import get_finance_database_path
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -139,6 +139,20 @@ CREATE TABLE IF NOT EXISTS marketing_spend (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(workspace_id, source, external_key)
 );
+CREATE TABLE IF NOT EXISTS manual_marketing_spend (
+    id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL,
+    workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE RESTRICT,
+    brand_id INTEGER NOT NULL REFERENCES brand(id) ON DELETE RESTRICT,
+    product_id INTEGER REFERENCES product(id) ON DELETE RESTRICT,
+    date TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    amount_krw INTEGER NOT NULL CHECK(amount_krw >= 0),
+    memo TEXT,
+    allocation_mode TEXT NOT NULL CHECK(allocation_mode IN ('single','range')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS marketing_allocation (
     id TEXT PRIMARY KEY,
     workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE RESTRICT,
@@ -163,6 +177,9 @@ CREATE INDEX IF NOT EXISTS ix_ad_spend_workspace_date ON ad_spend(workspace_id, 
 CREATE INDEX IF NOT EXISTS ix_ad_account_workspace_brand ON ad_account_connection(workspace_id, brand_id, active);
 CREATE INDEX IF NOT EXISTS ix_marketing_spend_workspace_date ON marketing_spend(workspace_id, date);
 CREATE INDEX IF NOT EXISTS ix_marketing_spend_brand_date ON marketing_spend(workspace_id, brand_id, date);
+CREATE INDEX IF NOT EXISTS ix_manual_spend_workspace_date ON manual_marketing_spend(workspace_id, date);
+CREATE INDEX IF NOT EXISTS ix_manual_spend_workspace_batch ON manual_marketing_spend(workspace_id, batch_id);
+CREATE INDEX IF NOT EXISTS ix_manual_spend_brand_product_date ON manual_marketing_spend(workspace_id, brand_id, product_id, date);
 CREATE INDEX IF NOT EXISTS ix_brand_workspace_active ON brand(workspace_id, active, name);
 CREATE INDEX IF NOT EXISTS ix_allocation_workspace_transaction ON marketing_allocation(workspace_id, transaction_id);
 CREATE INDEX IF NOT EXISTS ix_allocation_workspace_brand ON marketing_allocation(workspace_id, brand_id);
@@ -221,3 +238,4 @@ def finance_connection() -> Iterator[sqlite3.Connection]:
         yield connection
     finally:
         connection.close()
+
