@@ -132,6 +132,37 @@ def _naver_credentials(account: sqlite3.Row | dict) -> Credentials | None:
     return Credentials(api_key, secret_key, str(account["account_id"])) if api_key and secret_key else None
 
 
+def _naver_account_credentials(account: sqlite3.Row | dict) -> Credentials | None:
+    key = str(account["credential_key"] or "").strip().upper()
+    api_key = os.getenv(f"SBROCOR_NAVER_API_KEY_{key}")
+    secret_key = os.getenv(f"SBROCOR_NAVER_SECRET_KEY_{key}")
+    return Credentials(api_key, secret_key, str(account["customer_id"])) if api_key and secret_key else None
+
+
+def _public_naver_account(account: sqlite3.Row | dict, connection: sqlite3.Connection) -> dict:
+    item = dict(account)
+    item["credential_configured"] = bool(_naver_account_credentials(account))
+    latest = connection.execute(
+        "SELECT date,total_amount_krw FROM naver_account_sync_day WHERE workspace_id=? AND naver_account_connection_id=? ORDER BY date DESC LIMIT 1",
+        (item["workspace_id"], item["id"]),
+    ).fetchone()
+    item["latest_spend_date"] = latest["date"] if latest else None
+    item["latest_spend_amount"] = int(latest["total_amount_krw"] or 0) if latest else None
+    item["last_7d_amount"] = int(connection.execute(
+        "SELECT COALESCE(SUM(total_amount_krw),0) FROM naver_account_sync_day WHERE workspace_id=? AND naver_account_connection_id=? AND date BETWEEN date(?,'-6 days') AND ?",
+        (item["workspace_id"], item["id"], latest["date"], latest["date"]),
+    ).fetchone()[0]) if latest else None
+    item["campaign_count"] = int(connection.execute(
+        "SELECT COUNT(*) FROM naver_campaign WHERE workspace_id=? AND naver_account_connection_id=?",
+        (item["workspace_id"], item["id"]),
+    ).fetchone()[0])
+    item["unmapped_campaign_count"] = int(connection.execute(
+        "SELECT COUNT(*) FROM naver_campaign WHERE workspace_id=? AND naver_account_connection_id=? AND brand_id IS NULL AND active=1",
+        (item["workspace_id"], item["id"]),
+    ).fetchone()[0])
+    return item
+
+
 def _public_ad_account(item: dict, workspace_id: int, connection: sqlite3.Connection) -> dict:
     identity_locked = bool(connection.execute(
         "SELECT EXISTS(SELECT 1 FROM marketing_spend WHERE workspace_id=? AND ad_account_connection_id=?) "
@@ -446,6 +477,204 @@ for _resource in RESOURCE_CONFIG:
     )
 
 
+@finance_blueprint.route("/naver-accounts", methods=["GET", "POST"])
+@require_server_hmac
+def naver_accounts():
+    workspace_id = _workspace_id(); _authorize("ads", workspace_id, admin_only=request.method == "POST")
+    with finance_connection() as connection:
+        FinanceService(FinanceRepository(connection)).require_workspace(workspace_id)
+        if request.method == "GET":
+            rows = connection.execute(
+                "SELECT * FROM naver_account_connection WHERE workspace_id=? ORDER BY active DESC,account_name,id",
+                (workspace_id,),
+            ).fetchall()
+            return jsonify(items=[_public_naver_account(row, connection) for row in rows])
+        payload = _json_payload()
+        customer_id = str(payload.get("customer_id") or "").strip()
+        account_name = str(payload.get("account_name") or "").strip()
+        credential_key = str(payload.get("credential_key") or "").strip().upper()
+        if not customer_id or not account_name or not credential_key:
+            raise ValueError("customer_id, account_name and credential_key are required")
+        if not customer_id.isdigit(): raise ValueError("customer_id must contain digits only")
+        if not credential_key.replace("_", "").isalnum(): raise ValueError("invalid credential_key")
+        cursor = connection.execute(
+            "INSERT INTO naver_account_connection(workspace_id,customer_id,account_name,credential_key,active) VALUES (?,?,?,?,?)",
+            (workspace_id, customer_id, account_name, credential_key, 1 if payload.get("active", True) else 0),
+        )
+        connection.commit()
+        row = connection.execute("SELECT * FROM naver_account_connection WHERE id=?", (cursor.lastrowid,)).fetchone()
+        return jsonify(_public_naver_account(row, connection)), 201
+
+
+@finance_blueprint.patch("/naver-accounts/<int:account_id>")
+@require_server_hmac
+def update_naver_account(account_id: int):
+    workspace_id = _workspace_id(); _authorize("ads", workspace_id, admin_only=True); payload = _json_payload()
+    allowed = {"account_name", "credential_key", "active"}
+    if any(key not in allowed for key in payload): raise ValueError("unsupported Naver account field")
+    values = dict(payload)
+    if "credential_key" in values:
+        values["credential_key"] = str(values["credential_key"]).strip().upper()
+        if not values["credential_key"].replace("_", "").isalnum(): raise ValueError("invalid credential_key")
+    if "active" in values: values["active"] = 1 if values["active"] else 0
+    if not values: raise ValueError("no fields to update")
+    assignments = ",".join(f"{field}=?" for field in values)
+    with finance_connection() as connection:
+        cursor = connection.execute(
+            f"UPDATE naver_account_connection SET {assignments},updated_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?",
+            [*values.values(), account_id, workspace_id],
+        )
+        if not cursor.rowcount: raise LookupError("Naver account connection not found")
+        connection.commit()
+        row = connection.execute("SELECT * FROM naver_account_connection WHERE id=?", (account_id,)).fetchone()
+        return jsonify(_public_naver_account(row, connection))
+
+
+@finance_blueprint.get("/naver-accounts/<int:account_id>/campaigns")
+@require_server_hmac
+def naver_campaigns(account_id: int):
+    workspace_id = _workspace_id(); _authorize("ads", workspace_id)
+    with finance_connection() as connection:
+        if not connection.execute("SELECT 1 FROM naver_account_connection WHERE id=? AND workspace_id=?", (account_id, workspace_id)).fetchone():
+            raise LookupError("Naver account connection not found")
+        rows = connection.execute(
+            "SELECT c.*,b.name brand_name FROM naver_campaign c LEFT JOIN brand b ON b.id=c.brand_id AND b.workspace_id=c.workspace_id "
+            "WHERE c.workspace_id=? AND c.naver_account_connection_id=? ORDER BY c.active DESC,c.campaign_name,c.id",
+            (workspace_id, account_id),
+        ).fetchall()
+        return jsonify(items=[dict(row) for row in rows])
+
+
+@finance_blueprint.post("/naver-accounts/<int:account_id>/campaigns/refresh")
+@require_server_hmac
+def refresh_naver_campaigns(account_id: int):
+    workspace_id = _workspace_id(); _authorize("ads", workspace_id, admin_only=True)
+    with finance_connection() as connection:
+        account = connection.execute("SELECT * FROM naver_account_connection WHERE id=? AND workspace_id=?", (account_id, workspace_id)).fetchone()
+        if not account: raise LookupError("Naver account connection not found")
+        credentials = _naver_account_credentials(account)
+        if not credentials: return jsonify(error="naver_credentials_not_configured"), 503
+        discovered = NaverSearchAdsClient(credentials).campaigns()
+        seen = []
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for item in discovered:
+                seen.append(item["campaign_id"])
+                connection.execute(
+                    "INSERT INTO naver_campaign(workspace_id,naver_account_connection_id,campaign_id,campaign_name,status,active,last_seen_at) "
+                    "VALUES (?,?,?,?,?,1,CURRENT_TIMESTAMP) ON CONFLICT(workspace_id,naver_account_connection_id,campaign_id) DO UPDATE SET "
+                    "campaign_name=excluded.campaign_name,status=excluded.status,active=1,last_seen_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP",
+                    (workspace_id, account_id, item["campaign_id"], item["campaign_name"], item["status"]),
+                )
+            if seen:
+                placeholders = ",".join("?" for _ in seen)
+                connection.execute(
+                    f"UPDATE naver_campaign SET active=0,updated_at=CURRENT_TIMESTAMP WHERE workspace_id=? AND naver_account_connection_id=? AND campaign_id NOT IN ({placeholders})",
+                    [workspace_id, account_id, *seen],
+                )
+            else:
+                connection.execute("UPDATE naver_campaign SET active=0,updated_at=CURRENT_TIMESTAMP WHERE workspace_id=? AND naver_account_connection_id=?", (workspace_id, account_id))
+            connection.execute("UPDATE naver_account_connection SET last_campaign_synced_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?", (account_id,))
+            connection.commit()
+        except Exception:
+            connection.rollback(); raise
+        return jsonify(discovered=len(discovered), preserved_mappings=True)
+
+
+@finance_blueprint.route("/naver-campaigns/<int:campaign_row_id>/mapping", methods=["POST"])
+@require_server_hmac
+def map_naver_campaign(campaign_row_id: int):
+    workspace_id = _workspace_id(); _authorize("ads", workspace_id, admin_only=True); payload = _json_payload()
+    brand_id = payload.get("brand_id")
+    if brand_id in ("", None): brand_id = None
+    else: brand_id = int(brand_id)
+    apply = payload.get("apply") is True
+    with finance_connection() as connection:
+        campaign = connection.execute("SELECT * FROM naver_campaign WHERE id=? AND workspace_id=?", (campaign_row_id, workspace_id)).fetchone()
+        if not campaign: raise LookupError("Naver campaign not found")
+        if brand_id is not None and not connection.execute("SELECT 1 FROM brand WHERE id=? AND workspace_id=?", (brand_id, workspace_id)).fetchone():
+            raise ValueError("campaign brand must belong to the same workspace")
+        affected = connection.execute(
+            "SELECT COUNT(*) row_count,COALESCE(SUM(amount_krw),0) amount FROM naver_campaign_spend WHERE workspace_id=? AND naver_account_connection_id=? AND campaign_id=? AND brand_id IS NOT ?",
+            (workspace_id, campaign["naver_account_connection_id"], campaign["campaign_id"], brand_id),
+        ).fetchone()
+        preview = {"campaign_id": campaign["campaign_id"], "from_brand_id": campaign["brand_id"], "to_brand_id": brand_id, "historical_affected_rows": int(affected["row_count"]), "historical_affected_amount": int(affected["amount"])}
+        if not apply: return jsonify(dry_run=True, **preview)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("UPDATE naver_campaign SET brand_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?", (brand_id, campaign_row_id, workspace_id))
+            connection.execute("UPDATE naver_campaign_spend SET brand_id=?,updated_at=CURRENT_TIMESTAMP WHERE workspace_id=? AND naver_account_connection_id=? AND campaign_id=?", (brand_id, workspace_id, campaign["naver_account_connection_id"], campaign["campaign_id"]))
+            connection.commit()
+        except Exception:
+            connection.rollback(); raise
+        return jsonify(dry_run=False, **preview)
+
+
+@finance_blueprint.post("/naver-accounts/<int:account_id>/sync")
+@require_server_hmac
+def sync_naver_account(account_id: int):
+    workspace_id = _workspace_id(); _authorize("ads", workspace_id, admin_only=True); payload = _json_payload()
+    start = payload.get("start_date") or payload.get("target_date"); end = payload.get("end_date") or payload.get("target_date")
+    if not start or not end: raise ValueError("target_date or start/end date is required")
+    if start != end: raise ValueError("Naver sync는 현재 1일 단위로 실행해주세요.")
+    date.fromisoformat(start)
+    with finance_connection() as connection:
+        account = connection.execute("SELECT * FROM naver_account_connection WHERE id=? AND workspace_id=?", (account_id, workspace_id)).fetchone()
+        if not account: raise LookupError("Naver account connection not found")
+        if not account["active"]: raise ValueError("Naver account connection is inactive")
+        credentials = _naver_account_credentials(account)
+        if not credentials: return jsonify(error="naver_credentials_not_configured"), 503
+        costs = NaverSearchAdsClient(credentials).daily_campaign_costs(start)
+        report_total = sum(costs.values())
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("DELETE FROM naver_campaign_spend WHERE workspace_id=? AND naver_account_connection_id=? AND date=?", (workspace_id, account_id, start))
+            unmapped_amount = 0; unmapped_count = 0
+            for campaign_id, amount in costs.items():
+                campaign = connection.execute(
+                    "SELECT * FROM naver_campaign WHERE workspace_id=? AND naver_account_connection_id=? AND campaign_id=?",
+                    (workspace_id, account_id, campaign_id),
+                ).fetchone()
+                if not campaign:
+                    cursor = connection.execute(
+                        "INSERT INTO naver_campaign(workspace_id,naver_account_connection_id,campaign_id,campaign_name,status,brand_id,active) VALUES (?,?,?,?,'REPORT_ONLY',NULL,0)",
+                        (workspace_id, account_id, campaign_id, f"미발견 캠페인 {campaign_id}"),
+                    )
+                    campaign = connection.execute("SELECT * FROM naver_campaign WHERE id=?", (cursor.lastrowid,)).fetchone()
+                brand_id = campaign["brand_id"]
+                if brand_id is None: unmapped_amount += amount; unmapped_count += 1
+                external_key = f"naver:{account['customer_id']}:{campaign_id}:{start}"
+                connection.execute(
+                    "INSERT INTO naver_campaign_spend(workspace_id,naver_account_connection_id,campaign_id,brand_id,date,amount_krw,external_key) VALUES (?,?,?,?,?,?,?)",
+                    (workspace_id, account_id, campaign_id, brand_id, start, amount, external_key),
+                )
+            saved_total = int(connection.execute("SELECT COALESCE(SUM(amount_krw),0) FROM naver_campaign_spend WHERE workspace_id=? AND naver_account_connection_id=? AND date=?", (workspace_id, account_id, start)).fetchone()[0])
+            if saved_total != report_total: raise ValueError("Naver account total reconciliation failed")
+            connection.execute(
+                "INSERT INTO naver_account_sync_day(workspace_id,naver_account_connection_id,date,total_amount_krw,campaign_count,unmapped_amount_krw,unmapped_campaign_count) VALUES (?,?,?,?,?,?,?) "
+                "ON CONFLICT(workspace_id,naver_account_connection_id,date) DO UPDATE SET total_amount_krw=excluded.total_amount_krw,campaign_count=excluded.campaign_count,unmapped_amount_krw=excluded.unmapped_amount_krw,unmapped_campaign_count=excluded.unmapped_campaign_count,updated_at=CURRENT_TIMESTAMP",
+                (workspace_id, account_id, start, report_total, len(costs), unmapped_amount, unmapped_count),
+            )
+            connection.execute("UPDATE naver_account_connection SET last_spend_synced_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?", (account_id,))
+            connection.commit()
+        except Exception:
+            connection.rollback(); raise
+        return jsonify(date=start, account_total=report_total, campaign_count=len(costs), unmapped_amount=unmapped_amount, unmapped_campaign_count=unmapped_count, reconciled=True)
+
+
+@finance_blueprint.get("/naver-legacy-cleanup/preview")
+@require_server_hmac
+def naver_legacy_cleanup_preview():
+    workspace_id = _workspace_id(); _authorize("ads", workspace_id, admin_only=True)
+    with finance_connection() as connection:
+        rows = connection.execute(
+            "SELECT ms.id,ms.date,ms.brand_id,ms.amount_krw,ms.external_key,ms.ad_account_connection_id,ac.account_id customer_id,ac.account_name "
+            "FROM marketing_spend ms JOIN ad_account_connection ac ON ac.id=ms.ad_account_connection_id AND ac.workspace_id=ms.workspace_id "
+            "WHERE ms.workspace_id=? AND ms.source='naver_api' AND ac.platform='naver' ORDER BY ms.date,ms.id",
+            (workspace_id,),
+        ).fetchall()
+        amounts = [int(row["amount_krw"] or 0) for row in rows]
+        return jsonify(dry_run=True, row_count=len(rows), total_amount=sum(amounts), min_date=rows[0]["date"] if rows else None, max_date=rows[-1]["date"] if rows else None, items=[dict(row) for row in rows])
 @finance_blueprint.get("/marketing/channels")
 @require_server_hmac
 def marketing_channels():
@@ -817,35 +1046,8 @@ def sync_ad_account(connection_id: int):
         ).fetchone()
         if not account: raise LookupError("ad account connection not found")
         if not account["active"]: raise ValueError("ad account connection is inactive")
-        if account["platform"] == "naver" and start_day != end_day:
-            raise ValueError("Naver sync는 현재 1일 단위로 실행해주세요.")
         if account["platform"] == "naver":
-            credentials = _naver_credentials(account)
-            if not credentials:
-                return jsonify(error="naver_credentials_not_configured"), 503
-            client = NaverSearchAdsClient(credentials)
-            daily_spend: dict[str, int] = {}
-            cursor = start_day
-            while cursor <= end_day:
-                day = cursor.isoformat()
-                daily_spend[day] = client.daily_cost(day)
-                cursor += timedelta(days=1)
-            try:
-                connection.execute("BEGIN IMMEDIATE")
-                for day, amount in daily_spend.items():
-                    external_key = f"naver:{account['account_id']}:{day}:account"
-                    connection.execute(
-                        "INSERT INTO marketing_spend(workspace_id,ad_account_connection_id,brand_id,product_id,date,channel,original_amount,currency,fx_rate,amount_krw,source,external_key) "
-                        "VALUES (?,?,?,NULL,?,'네이버',?,'KRW',1,?,'naver_api',?) ON CONFLICT(workspace_id,source,external_key) DO UPDATE SET "
-                        "ad_account_connection_id=excluded.ad_account_connection_id,brand_id=excluded.brand_id,original_amount=excluded.original_amount,currency='KRW',fx_rate=1,amount_krw=excluded.amount_krw,updated_at=CURRENT_TIMESTAMP",
-                        (workspace_id, connection_id, account["brand_id"], day, amount, amount, external_key),
-                    )
-                connection.execute("UPDATE ad_account_connection SET last_synced_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?", (connection_id, workspace_id))
-                connection.commit()
-            except Exception:
-                connection.rollback()
-                raise
-            return jsonify(connection_id=connection_id, raw_saved=0, days_synced=len(daily_spend), zero_spend_days=sum(value == 0 for value in daily_spend.values()), start_date=start, end_date=end, currency="KRW", currency_converted=True)
+            raise ValueError("Naver legacy account sync is disabled. Use the campaign attribution endpoint.")
         if account["platform"] != "meta": raise ValueError("sync is not implemented for this platform")
         token = _credential_token(account, workspace_id)
         if not token: return jsonify(error="meta_token_not_configured"), 503

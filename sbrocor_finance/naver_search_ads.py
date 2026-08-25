@@ -16,6 +16,12 @@ import requests
 
 
 BASE_URL = "https://api.searchad.naver.com"
+# Official AD STAT-REPORT order: Date, CUSTOMER ID, Campaign ID, AD Group ID,
+# Keyword ID, AD ID, Business Channel ID, Media code, PC/Mobile, Impression,
+# Click, Cost, View count. Keep named indexes so campaign attribution never
+# relies on an unexplained positional guess.
+AD_REPORT_CAMPAIGN_ID_INDEX = 2
+AD_REPORT_COST_INDEX = 11
 
 
 class NaverApiError(Exception):
@@ -83,6 +89,22 @@ class NaverSearchAdsClient:
         message = re.sub(r"(?i)(X-(?:API-KEY|Signature)\s*[:=]\s*)\S+", r"\1[REDACTED]", message)
         return message[:300]
 
+    def campaigns(self) -> list[dict[str, object]]:
+        """Return the official /ncc/campaigns response in a stable shape."""
+        payload = self._request("GET", "/ncc/campaigns").json()
+        if not isinstance(payload, list):
+            raise NaverApiError("Naver 캠페인 목록 형식이 올바르지 않습니다.")
+        campaigns = []
+        for item in payload:
+            if not isinstance(item, dict) or not item.get("nccCampaignId") or not item.get("name"):
+                raise NaverApiError("Naver 캠페인 항목 형식이 올바르지 않습니다.")
+            campaigns.append({
+                "campaign_id": str(item["nccCampaignId"]),
+                "campaign_name": str(item["name"]),
+                "status": str(item.get("status") or ""),
+            })
+        return campaigns
+
     def daily_cost(self, day: str) -> int:
         """Build official AD report and sum its Cost column for the whole customer."""
         created = self._request("POST", "/stat-reports", json={"reportTp": "AD", "statDt": day.replace("-", "")}).json()
@@ -115,6 +137,40 @@ class NaverSearchAdsClient:
             raise NaverApiError("Naver 보고서를 다운로드하지 못했습니다.")
         return parse_ad_report_cost(downloaded.content)
 
+    def daily_campaign_costs(self, day: str) -> dict[str, int]:
+        """Build one official AD report and aggregate exact Cost by Campaign ID."""
+        return self._download_ad_report(day, parse_ad_report_campaign_costs)
+
+    def _download_ad_report(self, day: str, parser):
+        created = self._request("POST", "/stat-reports", json={"reportTp": "AD", "statDt": day.replace("-", "")}).json()
+        job_id = created.get("reportJobId")
+        if not job_id:
+            raise NaverApiError("Naver 보고서 생성 결과가 올바르지 않습니다.")
+        status = created.get("status")
+        report = created
+        for _ in range(self.max_polls):
+            if status in {"BUILT", "NONE", "ERROR", "AGGREGATING"}:
+                break
+            if self.poll_seconds:
+                time.sleep(self.poll_seconds)
+            report = self._request("GET", f"/stat-reports/{job_id}").json()
+            status = report.get("status")
+        if status == "NONE":
+            return {}
+        if status != "BUILT" or not report.get("downloadUrl"):
+            raise NaverApiError("Naver 보고서를 완료하지 못했습니다.")
+        download_url = str(report["downloadUrl"])
+        parts = urlsplit(download_url)
+        if parts.scheme != "https" or parts.hostname != "api.searchad.naver.com" or parts.path != "/report-download":
+            raise NaverApiError("Naver 보고서 다운로드 URL이 올바르지 않습니다.")
+        try:
+            downloaded = self.session.get(download_url, headers=self._headers("GET", "/report-download"), timeout=120)
+        except requests.RequestException:
+            raise NaverApiError("Naver 보고서를 다운로드하지 못했습니다.") from None
+        if not 200 <= int(downloaded.status_code) < 300:
+            raise NaverApiError("Naver 보고서를 다운로드하지 못했습니다.")
+        return parser(downloaded.content)
+
 
 def parse_ad_report_cost(content: bytes) -> int:
     """Sum the documented AD-report Cost column (12th column, zero-based 11)."""
@@ -130,4 +186,27 @@ def parse_ad_report_cost(content: bytes) -> int:
         except ValueError as error:
             raise NaverApiError("Naver 광고효과보고서 Cost 값이 올바르지 않습니다.") from error
     return round(total)
+
+
+def parse_ad_report_campaign_costs(content: bytes) -> dict[str, int]:
+    """Aggregate the documented AD report Campaign ID and exact Cost columns."""
+    text = content.decode("utf-8-sig", errors="strict")
+    totals: dict[str, float] = {}
+    for row in csv.reader(io.StringIO(text), delimiter="\t"):
+        if not row or all(not value.strip() for value in row):
+            continue
+        if len(row) <= AD_REPORT_COST_INDEX:
+            raise NaverApiError("Naver 광고효과보고서 형식이 올바르지 않습니다.")
+        campaign_id = row[AD_REPORT_CAMPAIGN_ID_INDEX].strip()
+        if not campaign_id:
+            raise NaverApiError("Naver 광고효과보고서 Campaign ID가 올바르지 않습니다.")
+        try:
+            cost = float(row[AD_REPORT_COST_INDEX].replace(",", ""))
+        except ValueError as error:
+            raise NaverApiError("Naver 광고효과보고서 Cost 값이 올바르지 않습니다.") from error
+        totals[campaign_id] = totals.get(campaign_id, 0.0) + cost
+    rounded = {campaign_id: round(amount) for campaign_id, amount in totals.items()}
+    if sum(rounded.values()) != round(sum(totals.values())):
+        raise NaverApiError("Naver 캠페인 비용 합계가 계정 비용과 일치하지 않습니다.")
+    return rounded
 
