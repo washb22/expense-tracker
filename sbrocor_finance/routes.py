@@ -42,14 +42,93 @@ class StalePreviewError(Exception):
     """The approved campaign attribution snapshot changed before apply."""
 
 
+def _naver_adgroup_sync_hook(_stage: str) -> None:
+    """Fault-injection seam for transactional daily replacement tests."""
+
+
+def _adgroup_allocation_snapshot(
+    connection: sqlite3.Connection,
+    adgroup: sqlite3.Row,
+    allocation_mode: str,
+    product_id: int | None,
+) -> dict:
+    rows = connection.execute(
+        "SELECT id,date,allocation_mode,product_id,amount_krw,updated_at FROM naver_adgroup_spend "
+        "WHERE workspace_id=? AND naver_account_connection_id=? AND adgroup_id=? "
+        "AND (allocation_mode!=? OR product_id IS NOT ?) ORDER BY id,date",
+        (adgroup["workspace_id"], adgroup["naver_account_connection_id"], adgroup["adgroup_id"], allocation_mode, product_id),
+    ).fetchall()
+    snapshot = {
+        "adgroup": {
+            "id": adgroup["id"], "adgroup_id": adgroup["adgroup_id"],
+            "allocation_mode": adgroup["allocation_mode"], "product_id": adgroup["product_id"],
+            "updated_at": adgroup["updated_at"],
+        },
+        "to": {"allocation_mode": allocation_mode, "product_id": product_id},
+        "spend": [dict(row) for row in rows],
+    }
+    token = hashlib.sha256(json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return {
+        "preview_token": token,
+        "historical_affected_rows": len(rows),
+        "historical_affected_amount": sum(int(row["amount_krw"] or 0) for row in rows),
+    }
+
+
+def _validate_adgroup_allocation(
+    connection: sqlite3.Connection, adgroup: sqlite3.Row, allocation_mode: str, product_id: int | None
+) -> tuple[sqlite3.Row, sqlite3.Row | None]:
+    if allocation_mode not in {"unassigned", "brand_common", "product"}:
+        raise ValueError("invalid allocation_mode")
+    if allocation_mode == "product" and product_id is None:
+        raise ValueError("product_id is required for product allocation")
+    if allocation_mode != "product" and product_id is not None:
+        raise ValueError("product_id must be null unless allocation_mode is product")
+    campaign = connection.execute(
+        "SELECT * FROM naver_campaign WHERE workspace_id=? AND naver_account_connection_id=? AND campaign_id=?",
+        (adgroup["workspace_id"], adgroup["naver_account_connection_id"], adgroup["campaign_id"]),
+    ).fetchone()
+    if not campaign:
+        raise ValueError("parent campaign not found")
+    product = None
+    if allocation_mode == "product":
+        if campaign["brand_id"] is None:
+            raise ValueError("먼저 캠페인 브랜드를 지정해주세요.")
+        product = connection.execute(
+            "SELECT * FROM product WHERE id=? AND workspace_id=?", (product_id, adgroup["workspace_id"])
+        ).fetchone()
+        if not product or product["brand_id"] is None or int(product["brand_id"]) != int(campaign["brand_id"]):
+            raise ValueError("광고그룹 제품은 캠페인과 같은 브랜드여야 합니다.")
+    return campaign, product
+
+
+def _ensure_campaign_brand_change_safe(
+    connection: sqlite3.Connection, campaign: sqlite3.Row, to_brand_id: int | None
+) -> None:
+    incompatible = connection.execute(
+        "SELECT COUNT(*) FROM naver_adgroup g JOIN product p ON p.id=g.product_id AND p.workspace_id=g.workspace_id "
+        "WHERE g.workspace_id=? AND g.naver_account_connection_id=? AND g.campaign_id=? "
+        "AND g.allocation_mode='product' AND (p.brand_id IS NULL OR p.brand_id IS NOT ?)",
+        (campaign["workspace_id"], campaign["naver_account_connection_id"], campaign["campaign_id"], to_brand_id),
+    ).fetchone()[0]
+    if incompatible:
+        raise ValueError("연결된 광고그룹 제품 매핑을 먼저 해제해주세요.")
+
+
 def _campaign_mapping_snapshot(
     connection: sqlite3.Connection, campaign: sqlite3.Row, to_brand_id: int | None
 ) -> dict:
     rows = connection.execute(
-        "SELECT id,date,brand_id,amount_krw,updated_at FROM naver_campaign_spend "
+        "SELECT 'campaign' source,id,date,brand_id,amount_krw,updated_at FROM naver_campaign_spend "
         "WHERE workspace_id=? AND naver_account_connection_id=? AND campaign_id=? AND brand_id IS NOT ? "
-        "ORDER BY id,date",
+        "UNION ALL SELECT 'adgroup' source,id,date,brand_id,amount_krw,updated_at FROM naver_adgroup_spend "
+        "WHERE workspace_id=? AND naver_account_connection_id=? AND campaign_id=? AND brand_id IS NOT ? "
+        "ORDER BY source,id,date",
         (
+            campaign["workspace_id"],
+            campaign["naver_account_connection_id"],
+            campaign["campaign_id"],
+            to_brand_id,
             campaign["workspace_id"],
             campaign["naver_account_connection_id"],
             campaign["campaign_id"],
@@ -67,6 +146,7 @@ def _campaign_mapping_snapshot(
         "spend": [
             {
                 "id": row["id"],
+                "source": row["source"],
                 "date": row["date"],
                 "brand_id": row["brand_id"],
                 "amount_krw": row["amount_krw"],
@@ -633,6 +713,103 @@ def refresh_naver_campaigns(account_id: int):
         return jsonify(discovered=len(discovered), preserved_mappings=True)
 
 
+@finance_blueprint.get("/naver-accounts/<int:account_id>/adgroups")
+@require_server_hmac
+def naver_adgroups(account_id: int):
+    workspace_id = _workspace_id(); _authorize("ads", workspace_id)
+    with finance_connection() as connection:
+        if not connection.execute("SELECT 1 FROM naver_account_connection WHERE id=? AND workspace_id=?", (account_id, workspace_id)).fetchone():
+            raise LookupError("Naver account connection not found")
+        rows = connection.execute(
+            "SELECT g.*,c.campaign_name,c.brand_id campaign_brand_id,b.name campaign_brand_name,p.name product_name "
+            "FROM naver_adgroup g JOIN naver_campaign c ON c.workspace_id=g.workspace_id "
+            "AND c.naver_account_connection_id=g.naver_account_connection_id AND c.campaign_id=g.campaign_id "
+            "LEFT JOIN brand b ON b.id=c.brand_id AND b.workspace_id=c.workspace_id "
+            "LEFT JOIN product p ON p.id=g.product_id AND p.workspace_id=g.workspace_id "
+            "WHERE g.workspace_id=? AND g.naver_account_connection_id=? "
+            "ORDER BY c.campaign_name,g.active DESC,g.adgroup_name,g.id",
+            (workspace_id, account_id),
+        ).fetchall()
+        return jsonify(items=[dict(row) for row in rows])
+
+
+@finance_blueprint.post("/naver-accounts/<int:account_id>/adgroups/refresh")
+@require_server_hmac
+def refresh_naver_adgroups(account_id: int):
+    workspace_id = _workspace_id(); _authorize("ads", workspace_id, admin_only=True)
+    with finance_connection() as connection:
+        account = connection.execute("SELECT * FROM naver_account_connection WHERE id=? AND workspace_id=?", (account_id, workspace_id)).fetchone()
+        if not account: raise LookupError("Naver account connection not found")
+        if not account["active"]: raise ValueError("Naver account connection is inactive")
+        credentials = _naver_account_credentials(account)
+        if not credentials: return jsonify(error="naver_credentials_not_configured"), 503
+        discovered = NaverSearchAdsClient(credentials).adgroups()
+        seen = []
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for item in discovered:
+                seen.append(item["adgroup_id"])
+                connection.execute(
+                    "INSERT INTO naver_adgroup(workspace_id,naver_account_connection_id,campaign_id,adgroup_id,adgroup_name,status,allocation_mode,product_id,active,last_seen_at) "
+                    "VALUES (?,?,?,?,?,?,'unassigned',NULL,1,CURRENT_TIMESTAMP) "
+                    "ON CONFLICT(workspace_id,naver_account_connection_id,adgroup_id) DO UPDATE SET "
+                    "campaign_id=excluded.campaign_id,adgroup_name=excluded.adgroup_name,status=excluded.status,active=1,last_seen_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP",
+                    (workspace_id, account_id, item["campaign_id"], item["adgroup_id"], item["adgroup_name"], item["status"]),
+                )
+            if seen:
+                placeholders = ",".join("?" for _ in seen)
+                connection.execute(
+                    f"UPDATE naver_adgroup SET active=0,updated_at=CURRENT_TIMESTAMP WHERE workspace_id=? AND naver_account_connection_id=? AND adgroup_id NOT IN ({placeholders})",
+                    [workspace_id, account_id, *seen],
+                )
+            else:
+                connection.execute("UPDATE naver_adgroup SET active=0,updated_at=CURRENT_TIMESTAMP WHERE workspace_id=? AND naver_account_connection_id=?", (workspace_id, account_id))
+            connection.commit()
+        except Exception:
+            connection.rollback(); raise
+        return jsonify(discovered=len(discovered), preserved_allocations=True)
+
+
+@finance_blueprint.post("/naver-adgroups/<int:adgroup_row_id>/allocation")
+@require_server_hmac
+def allocate_naver_adgroup(adgroup_row_id: int):
+    workspace_id = _workspace_id(); _authorize("ads", workspace_id, admin_only=True); payload = _json_payload()
+    allocation_mode = str(payload.get("allocation_mode") or "")
+    product_id = payload.get("product_id")
+    product_id = None if product_id in (None, "") else int(product_id)
+    apply = payload.get("apply") is True
+    with finance_connection() as connection:
+        adgroup = connection.execute("SELECT * FROM naver_adgroup WHERE id=? AND workspace_id=?", (adgroup_row_id, workspace_id)).fetchone()
+        if not adgroup: raise LookupError("Naver ad group not found")
+        _validate_adgroup_allocation(connection, adgroup, allocation_mode, product_id)
+        snapshot = _adgroup_allocation_snapshot(connection, adgroup, allocation_mode, product_id)
+        if not apply:
+            return jsonify(dry_run=True, from_allocation_mode=adgroup["allocation_mode"], from_product_id=adgroup["product_id"], to_allocation_mode=allocation_mode, to_product_id=product_id, **snapshot)
+        expected_mode = str(payload.get("from_allocation_mode") or "")
+        expected_product = payload.get("from_product_id")
+        expected_product = None if expected_product in (None, "") else int(expected_product)
+        expected_token = str(payload.get("preview_token") or "")
+        if not expected_token: raise ValueError("preview_token is required")
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            adgroup = connection.execute("SELECT * FROM naver_adgroup WHERE id=? AND workspace_id=?", (adgroup_row_id, workspace_id)).fetchone()
+            if not adgroup: raise LookupError("Naver ad group not found")
+            campaign, _ = _validate_adgroup_allocation(connection, adgroup, allocation_mode, product_id)
+            snapshot = _adgroup_allocation_snapshot(connection, adgroup, allocation_mode, product_id)
+            if adgroup["allocation_mode"] != expected_mode or adgroup["product_id"] != expected_product or snapshot["preview_token"] != expected_token:
+                raise StalePreviewError()
+            connection.execute("UPDATE naver_adgroup SET allocation_mode=?,product_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (allocation_mode, product_id, adgroup_row_id))
+            connection.execute(
+                "UPDATE naver_adgroup_spend SET brand_id=?,allocation_mode=?,product_id=?,updated_at=CURRENT_TIMESTAMP "
+                "WHERE workspace_id=? AND naver_account_connection_id=? AND adgroup_id=?",
+                (campaign["brand_id"], allocation_mode, product_id, workspace_id, adgroup["naver_account_connection_id"], adgroup["adgroup_id"]),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback(); raise
+        return jsonify(dry_run=False, from_allocation_mode=expected_mode, from_product_id=expected_product, to_allocation_mode=allocation_mode, to_product_id=product_id, **snapshot)
+
+
 @finance_blueprint.route("/naver-campaigns/<int:campaign_row_id>/mapping", methods=["POST"])
 @require_server_hmac
 def map_naver_campaign(campaign_row_id: int):
@@ -647,6 +824,7 @@ def map_naver_campaign(campaign_row_id: int):
         if not apply:
             campaign = connection.execute("SELECT * FROM naver_campaign WHERE id=? AND workspace_id=?", (campaign_row_id, workspace_id)).fetchone()
             if not campaign: raise LookupError("Naver campaign not found")
+            _ensure_campaign_brand_change_safe(connection, campaign, brand_id)
             snapshot = _campaign_mapping_snapshot(connection, campaign, brand_id)
             return jsonify(dry_run=True, campaign_id=campaign["campaign_id"], from_brand_id=campaign["brand_id"], to_brand_id=brand_id, **snapshot)
         if "from_brand_id" not in payload:
@@ -660,12 +838,14 @@ def map_naver_campaign(campaign_row_id: int):
             connection.execute("BEGIN IMMEDIATE")
             campaign = connection.execute("SELECT * FROM naver_campaign WHERE id=? AND workspace_id=?", (campaign_row_id, workspace_id)).fetchone()
             if not campaign: raise LookupError("Naver campaign not found")
+            _ensure_campaign_brand_change_safe(connection, campaign, brand_id)
             snapshot = _campaign_mapping_snapshot(connection, campaign, brand_id)
             if campaign["brand_id"] != expected_from or snapshot["preview_token"] != expected_token:
                 raise StalePreviewError()
             preview = {"campaign_id": campaign["campaign_id"], "from_brand_id": campaign["brand_id"], "to_brand_id": brand_id, **snapshot}
             connection.execute("UPDATE naver_campaign SET brand_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?", (brand_id, campaign_row_id, workspace_id))
             connection.execute("UPDATE naver_campaign_spend SET brand_id=?,updated_at=CURRENT_TIMESTAMP WHERE workspace_id=? AND naver_account_connection_id=? AND campaign_id=?", (brand_id, workspace_id, campaign["naver_account_connection_id"], campaign["campaign_id"]))
+            connection.execute("UPDATE naver_adgroup_spend SET brand_id=?,updated_at=CURRENT_TIMESTAMP WHERE workspace_id=? AND naver_account_connection_id=? AND campaign_id=?", (brand_id, workspace_id, campaign["naver_account_connection_id"], campaign["campaign_id"]))
             connection.commit()
         except Exception:
             connection.rollback(); raise
@@ -686,13 +866,13 @@ def sync_naver_account(account_id: int):
         if not account["active"]: raise ValueError("Naver account connection is inactive")
         credentials = _naver_account_credentials(account)
         if not credentials: return jsonify(error="naver_credentials_not_configured"), 503
-        costs = NaverSearchAdsClient(credentials).daily_campaign_costs(start)
+        costs = NaverSearchAdsClient(credentials).daily_adgroup_costs(start)
         report_total = sum(costs.values())
         try:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute("DELETE FROM naver_campaign_spend WHERE workspace_id=? AND naver_account_connection_id=? AND date=?", (workspace_id, account_id, start))
-            unmapped_amount = 0; unmapped_count = 0
-            for campaign_id, amount in costs.items():
+            prepared = []
+            unmapped_amount = 0; unmapped_campaigns = set(); product_amount = 0; common_amount = 0; unassigned_product_amount = 0; unassigned_groups = set()
+            for (campaign_id, adgroup_id), amount in costs.items():
                 campaign = connection.execute(
                     "SELECT * FROM naver_campaign WHERE workspace_id=? AND naver_account_connection_id=? AND campaign_id=?",
                     (workspace_id, account_id, campaign_id),
@@ -703,25 +883,65 @@ def sync_naver_account(account_id: int):
                         (workspace_id, account_id, campaign_id, f"미발견 캠페인 {campaign_id}"),
                     )
                     campaign = connection.execute("SELECT * FROM naver_campaign WHERE id=?", (cursor.lastrowid,)).fetchone()
+                adgroup = connection.execute(
+                    "SELECT * FROM naver_adgroup WHERE workspace_id=? AND naver_account_connection_id=? AND adgroup_id=?",
+                    (workspace_id, account_id, adgroup_id),
+                ).fetchone()
+                if not adgroup:
+                    cursor = connection.execute(
+                        "INSERT INTO naver_adgroup(workspace_id,naver_account_connection_id,campaign_id,adgroup_id,adgroup_name,status,allocation_mode,product_id,active) "
+                        "VALUES (?,?,?,?,?,'REPORT_ONLY','unassigned',NULL,0)",
+                        (workspace_id, account_id, campaign_id, adgroup_id, f"미발견 광고그룹 {adgroup_id}"),
+                    )
+                    adgroup = connection.execute("SELECT * FROM naver_adgroup WHERE id=?", (cursor.lastrowid,)).fetchone()
                 brand_id = campaign["brand_id"]
-                if brand_id is None: unmapped_amount += amount; unmapped_count += 1
-                external_key = f"naver:{account['customer_id']}:{campaign_id}:{start}"
+                mode = adgroup["allocation_mode"]
+                product_id = adgroup["product_id"] if mode == "product" else None
+                if brand_id is None:
+                    product_id = None
+                    unmapped_amount += amount; unmapped_campaigns.add(campaign_id)
+                elif mode == "product":
+                    product = connection.execute("SELECT brand_id FROM product WHERE id=? AND workspace_id=?", (product_id, workspace_id)).fetchone()
+                    if not product or product["brand_id"] != brand_id:
+                        raise ValueError("Naver ad group product mapping is inconsistent with campaign brand")
+                    product_amount += amount
+                elif mode == "brand_common":
+                    common_amount += amount
+                else:
+                    unassigned_product_amount += amount; unassigned_groups.add(adgroup_id)
+                prepared.append((campaign_id, adgroup_id, brand_id, product_id, mode, amount))
+            # Only replace a day after API parsing and all mapping validation succeeded.
+            _naver_adgroup_sync_hook("before_replace")
+            connection.execute("DELETE FROM naver_adgroup_spend WHERE workspace_id=? AND naver_account_connection_id=? AND date=?", (workspace_id, account_id, start))
+            _naver_adgroup_sync_hook("after_delete")
+            for campaign_id, adgroup_id, brand_id, product_id, mode, amount in prepared:
+                external_key = f"naver:{account['customer_id']}:{campaign_id}:{adgroup_id}:{start}"
                 connection.execute(
-                    "INSERT INTO naver_campaign_spend(workspace_id,naver_account_connection_id,campaign_id,brand_id,date,amount_krw,external_key) VALUES (?,?,?,?,?,?,?)",
-                    (workspace_id, account_id, campaign_id, brand_id, start, amount, external_key),
+                    "INSERT INTO naver_adgroup_spend(workspace_id,naver_account_connection_id,campaign_id,adgroup_id,brand_id,product_id,allocation_mode,date,amount_krw,external_key) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (workspace_id, account_id, campaign_id, adgroup_id, brand_id, product_id, mode, start, amount, external_key),
                 )
-            saved_total = int(connection.execute("SELECT COALESCE(SUM(amount_krw),0) FROM naver_campaign_spend WHERE workspace_id=? AND naver_account_connection_id=? AND date=?", (workspace_id, account_id, start)).fetchone()[0])
+            saved_total = int(connection.execute("SELECT COALESCE(SUM(amount_krw),0) FROM naver_adgroup_spend WHERE workspace_id=? AND naver_account_connection_id=? AND date=?", (workspace_id, account_id, start)).fetchone()[0])
             if saved_total != report_total: raise ValueError("Naver account total reconciliation failed")
+            saved_campaigns = {row["campaign_id"]: int(row["amount"] or 0) for row in connection.execute(
+                "SELECT campaign_id,SUM(amount_krw) amount FROM naver_adgroup_spend WHERE workspace_id=? AND naver_account_connection_id=? AND date=? GROUP BY campaign_id",
+                (workspace_id, account_id, start),
+            )}
+            expected_campaigns = {}
+            for (campaign_id, _), amount in costs.items(): expected_campaigns[campaign_id] = expected_campaigns.get(campaign_id, 0) + amount
+            if saved_campaigns != expected_campaigns: raise ValueError("Naver campaign derived reconciliation failed")
             connection.execute(
-                "INSERT INTO naver_account_sync_day(workspace_id,naver_account_connection_id,date,total_amount_krw,campaign_count,unmapped_amount_krw,unmapped_campaign_count) VALUES (?,?,?,?,?,?,?) "
-                "ON CONFLICT(workspace_id,naver_account_connection_id,date) DO UPDATE SET total_amount_krw=excluded.total_amount_krw,campaign_count=excluded.campaign_count,unmapped_amount_krw=excluded.unmapped_amount_krw,unmapped_campaign_count=excluded.unmapped_campaign_count,updated_at=CURRENT_TIMESTAMP",
-                (workspace_id, account_id, start, report_total, len(costs), unmapped_amount, unmapped_count),
+                "INSERT INTO naver_account_sync_day(workspace_id,naver_account_connection_id,date,total_amount_krw,campaign_count,unmapped_amount_krw,unmapped_campaign_count,adgroup_count,product_attributed_amount_krw,brand_common_amount_krw,unassigned_product_amount_krw,unassigned_adgroup_count) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id,naver_account_connection_id,date) DO UPDATE SET "
+                "total_amount_krw=excluded.total_amount_krw,campaign_count=excluded.campaign_count,unmapped_amount_krw=excluded.unmapped_amount_krw,unmapped_campaign_count=excluded.unmapped_campaign_count,adgroup_count=excluded.adgroup_count,product_attributed_amount_krw=excluded.product_attributed_amount_krw,brand_common_amount_krw=excluded.brand_common_amount_krw,unassigned_product_amount_krw=excluded.unassigned_product_amount_krw,unassigned_adgroup_count=excluded.unassigned_adgroup_count,updated_at=CURRENT_TIMESTAMP",
+                (workspace_id, account_id, start, report_total, len(expected_campaigns), unmapped_amount, len(unmapped_campaigns), len(costs), product_amount, common_amount, unassigned_product_amount, len(unassigned_groups)),
             )
             connection.execute("UPDATE naver_account_connection SET last_spend_synced_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?", (account_id,))
+            _naver_adgroup_sync_hook("before_commit")
             connection.commit()
         except Exception:
             connection.rollback(); raise
-        return jsonify(date=start, account_total=report_total, campaign_count=len(costs), unmapped_amount=unmapped_amount, unmapped_campaign_count=unmapped_count, reconciled=True)
+        return jsonify(date=start, account_total=report_total, campaign_count=len(expected_campaigns), adgroup_count=len(costs), unmapped_amount=unmapped_amount, unmapped_campaign_count=len(unmapped_campaigns), product_attributed_amount=product_amount, brand_common_amount=common_amount, unassigned_product_amount=unassigned_product_amount, unassigned_adgroup_count=len(unassigned_groups), reconciled=True)
 
 
 @finance_blueprint.get("/naver-legacy-cleanup/preview")

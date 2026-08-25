@@ -21,7 +21,7 @@ from sbrocor_finance.config import FinanceConfigurationError, get_finance_databa
 from sbrocor_finance.database import connect, initialize_database
 from sbrocor_finance.repository import FinanceRepository
 from sbrocor_finance.service import FinanceService
-from sbrocor_finance.naver_search_ads import Credentials, NaverApiError, NaverSearchAdsClient, generate_signature, parse_ad_report_cost, parse_ad_report_campaign_costs
+from sbrocor_finance.naver_search_ads import Credentials, NaverApiError, NaverSearchAdsClient, generate_signature, parse_ad_report_cost, parse_ad_report_campaign_costs, parse_ad_report_adgroup_costs
 from ops import cleanup_legacy_naver_spend
 
 
@@ -845,14 +845,14 @@ class FinanceApiTest(unittest.TestCase):
                 DROP TABLE ad_spend;
                 ALTER TABLE ad_spend_v2 RENAME TO ad_spend;
                 DROP TABLE ad_account_connection;
-                DELETE FROM schema_version WHERE version=3;
+                DELETE FROM schema_version WHERE version>2;
                 INSERT OR IGNORE INTO schema_version(version) VALUES (2);
             """)
             connection.commit()
         initialize_database(); initialize_database()
         with closing(connect()) as connection:
             after = tuple(connection.execute("SELECT (SELECT COUNT(*) FROM finance_transaction),(SELECT COUNT(*) FROM sale),(SELECT COUNT(*) FROM ad_spend),(SELECT COUNT(*) FROM product),(SELECT SUM(amount) FROM finance_transaction),(SELECT SUM(total_selling_amount) FROM sale),(SELECT SUM(net_profit) FROM sale)").fetchone())
-            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 5)
+            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 6)
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
             self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
             tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -868,13 +868,13 @@ class FinanceApiTest(unittest.TestCase):
         with closing(connect()) as connection:
             connection.execute("INSERT INTO marketing_spend(workspace_id,ad_account_connection_id,brand_id,date,channel,original_amount,currency,amount_krw,source,external_key) VALUES (1,?,?,?,'Meta',10,'KRW',10,'fixture','v4')", (account["id"], brand["id"], "2026-08-01"))
             before = tuple(connection.execute("SELECT (SELECT COUNT(*) FROM finance_transaction),(SELECT COUNT(*) FROM sale),(SELECT COUNT(*) FROM ad_spend),(SELECT COUNT(*) FROM marketing_spend),(SELECT COUNT(*) FROM product),(SELECT COALESCE(SUM(amount_krw),0) FROM marketing_spend)").fetchone())
-            connection.executescript("DROP INDEX ix_manual_spend_workspace_date; DROP INDEX ix_manual_spend_workspace_batch; DROP INDEX ix_manual_spend_brand_product_date; DROP TABLE manual_marketing_spend; DELETE FROM schema_version WHERE version=4;")
+            connection.executescript("DROP INDEX ix_manual_spend_workspace_date; DROP INDEX ix_manual_spend_workspace_batch; DROP INDEX ix_manual_spend_brand_product_date; DROP TABLE manual_marketing_spend; DELETE FROM schema_version WHERE version>3;")
             connection.commit()
         initialize_database(); initialize_database()
         with closing(connect()) as connection:
             after = tuple(connection.execute("SELECT (SELECT COUNT(*) FROM finance_transaction),(SELECT COUNT(*) FROM sale),(SELECT COUNT(*) FROM ad_spend),(SELECT COUNT(*) FROM marketing_spend),(SELECT COUNT(*) FROM product),(SELECT COALESCE(SUM(amount_krw),0) FROM marketing_spend)").fetchone())
             self.assertEqual(before, after)
-            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 5)
+            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 6)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM manual_marketing_spend").fetchone()[0], 0)
             self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
@@ -897,7 +897,7 @@ class FinanceApiTest(unittest.TestCase):
                 DROP TABLE naver_campaign_spend;
                 DROP TABLE naver_campaign;
                 DROP TABLE naver_account_connection;
-                DELETE FROM schema_version WHERE version=5;
+                DELETE FROM schema_version WHERE version>=5;
                 INSERT OR IGNORE INTO schema_version(version) VALUES (4);
             """)
             connection.commit()
@@ -905,7 +905,7 @@ class FinanceApiTest(unittest.TestCase):
         with closing(connect()) as connection:
             after = tuple(connection.execute("SELECT (SELECT COUNT(*) FROM finance_transaction),(SELECT COUNT(*) FROM sale),(SELECT COUNT(*) FROM ad_spend),(SELECT COUNT(*) FROM marketing_spend),(SELECT COALESCE(SUM(amount_krw),0) FROM marketing_spend),(SELECT COUNT(*) FROM manual_marketing_spend),(SELECT COUNT(*) FROM product)").fetchone())
             self.assertEqual(before, after)
-            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 5)
+            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 6)
             copied = connection.execute("SELECT * FROM naver_account_connection WHERE workspace_id=1 AND customer_id='999569'").fetchone()
             self.assertEqual(copied["legacy_ad_account_connection_id"], legacy["id"])
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM marketing_spend WHERE source='naver_api'").fetchone()[0], 1)
@@ -933,7 +933,7 @@ class FinanceApiTest(unittest.TestCase):
                         DROP TABLE naver_campaign_spend;
                         DROP TABLE naver_campaign;
                         DROP TABLE naver_account_connection;
-                        DELETE FROM schema_version WHERE version=5;
+                        DELETE FROM schema_version WHERE version>=5;
                         INSERT OR IGNORE INTO schema_version(version) VALUES (4);
                     """)
                     connection.commit()
@@ -951,9 +951,79 @@ class FinanceApiTest(unittest.TestCase):
                 initialize_database(path)
                 initialize_database(path)
                 with closing(connect(path)) as connection:
-                    self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 5)
+                    self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 6)
                     self.assertEqual(tuple(connection.execute("SELECT COUNT(*),SUM(amount) FROM finance_transaction").fetchone()), (1, 123))
                     self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+
+    def test_schema_v6_rehearsal_from_v5_is_idempotent_and_preserves_financial_rows(self):
+        self.create_workspace(1)
+        brand = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "v6"}).json
+        naver = self.request("POST", "/api/sbrocor/finance/v1/naver-accounts?workspace_id=1", {"customer_id": "999569", "account_name": "N", "credential_key": "N"}).json
+        with closing(connect()) as connection:
+            connection.execute("INSERT INTO finance_transaction(id,workspace_id,date,merchant,amount,category) VALUES ('t',1,'2026-08-01','m',123,'광고비')")
+            connection.execute("INSERT INTO naver_campaign(workspace_id,naver_account_connection_id,campaign_id,campaign_name,status,brand_id) VALUES (1,?,'C','Campaign','ELIGIBLE',?)", (naver["id"], brand["id"]))
+            before = tuple(connection.execute("SELECT (SELECT COUNT(*) FROM finance_transaction),(SELECT SUM(amount) FROM finance_transaction),(SELECT COUNT(*) FROM sale),(SELECT COUNT(*) FROM product),(SELECT COUNT(*) FROM ad_spend),(SELECT COUNT(*) FROM marketing_spend),(SELECT COUNT(*) FROM manual_marketing_spend),(SELECT COUNT(*) FROM naver_account_connection),(SELECT COUNT(*) FROM naver_campaign),(SELECT COUNT(*) FROM naver_campaign_spend)").fetchone())
+            connection.executescript("""
+                DROP INDEX ix_naver_adgroup_spend_product_date;
+                DROP INDEX ix_naver_adgroup_spend_brand_date;
+                DROP INDEX ix_naver_adgroup_spend_date;
+                DROP INDEX ix_naver_adgroup_product;
+                DROP INDEX ix_naver_adgroup_campaign;
+                DROP INDEX ix_naver_adgroup_account_active;
+                DROP TABLE naver_adgroup_spend;
+                DROP TABLE naver_adgroup;
+                ALTER TABLE naver_account_sync_day DROP COLUMN unassigned_adgroup_count;
+                ALTER TABLE naver_account_sync_day DROP COLUMN unassigned_product_amount_krw;
+                ALTER TABLE naver_account_sync_day DROP COLUMN brand_common_amount_krw;
+                ALTER TABLE naver_account_sync_day DROP COLUMN product_attributed_amount_krw;
+                ALTER TABLE naver_account_sync_day DROP COLUMN adgroup_count;
+                DELETE FROM schema_version WHERE version=6;
+            """)
+            connection.commit()
+        initialize_database(); initialize_database()
+        with closing(connect()) as connection:
+            after = tuple(connection.execute("SELECT (SELECT COUNT(*) FROM finance_transaction),(SELECT SUM(amount) FROM finance_transaction),(SELECT COUNT(*) FROM sale),(SELECT COUNT(*) FROM product),(SELECT COUNT(*) FROM ad_spend),(SELECT COUNT(*) FROM marketing_spend),(SELECT COUNT(*) FROM manual_marketing_spend),(SELECT COUNT(*) FROM naver_account_connection),(SELECT COUNT(*) FROM naver_campaign),(SELECT COUNT(*) FROM naver_campaign_spend)").fetchone())
+            self.assertEqual(before, after)
+            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 6)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM naver_adgroup").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM naver_adgroup_spend").fetchone()[0], 0)
+            self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+            self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_v5_to_v6_migration_failure_is_atomic_and_rerunnable(self):
+        for failure_stage in ("after_ddl", "before_version"):
+            with self.subTest(stage=failure_stage):
+                path = Path(self.tempdir.name) / f"v6-atomic-{failure_stage}.db"
+                initialize_database(path)
+                with closing(connect(path)) as connection:
+                    connection.execute("INSERT INTO workspace(id,name) VALUES (1,'W')")
+                    connection.execute("INSERT INTO finance_transaction(id,workspace_id,date,merchant,amount,category) VALUES ('t',1,'2026-08-01','m',123,'광고비')")
+                    connection.executescript("""
+                        DROP INDEX ix_naver_adgroup_spend_product_date; DROP INDEX ix_naver_adgroup_spend_brand_date; DROP INDEX ix_naver_adgroup_spend_date;
+                        DROP INDEX ix_naver_adgroup_product; DROP INDEX ix_naver_adgroup_campaign; DROP INDEX ix_naver_adgroup_account_active;
+                        DROP TABLE naver_adgroup_spend; DROP TABLE naver_adgroup;
+                        ALTER TABLE naver_account_sync_day DROP COLUMN unassigned_adgroup_count;
+                        ALTER TABLE naver_account_sync_day DROP COLUMN unassigned_product_amount_krw;
+                        ALTER TABLE naver_account_sync_day DROP COLUMN brand_common_amount_krw;
+                        ALTER TABLE naver_account_sync_day DROP COLUMN product_attributed_amount_krw;
+                        ALTER TABLE naver_account_sync_day DROP COLUMN adgroup_count;
+                        DELETE FROM schema_version WHERE version=6;
+                    """)
+                    connection.commit()
+                def fail(stage):
+                    if stage == failure_stage: raise RuntimeError("injected v6 migration failure")
+                with patch("sbrocor_finance.database._v6_migration_hook", side_effect=fail):
+                    with self.assertRaisesRegex(RuntimeError, "injected v6 migration failure"):
+                        initialize_database(path)
+                with closing(connect(path)) as connection:
+                    self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 5)
+                    tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                    self.assertNotIn("naver_adgroup", tables); self.assertNotIn("naver_adgroup_spend", tables)
+                    self.assertEqual(tuple(connection.execute("SELECT COUNT(*),SUM(amount) FROM finance_transaction").fetchone()), (1, 123))
+                initialize_database(path); initialize_database(path)
+                with closing(connect(path)) as connection:
+                    self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 6)
+                    self.assertEqual(tuple(connection.execute("SELECT COUNT(*),SUM(amount) FROM finance_transaction").fetchone()), (1, 123))
 
     def test_legacy_naver_cleanup_is_exact_fail_closed_and_rolls_back(self):
         self.create_workspace(1)
@@ -1380,6 +1450,7 @@ class FinanceApiTest(unittest.TestCase):
         self.assertEqual(generate_signature("1", "GET", "/stats", "secret"), "TE1nc7kY4Nu7dMxdSNHN/tTaKyvYzTUzNPfjOjPd1Os=")
         self.assertEqual(parse_ad_report_cost(("20260801\t1\ta\tb\tc\td\te\tf\tg\t1\t2\t50,000\n" "20260801\t1\ta\tb\tc\td\te\tf\tg\t3\t4\t25,000\n").encode()), 75000)
         self.assertEqual(parse_ad_report_campaign_costs(("20260801\t1\tA\tb\tc\td\te\tf\tg\t1\t2\t100,000\n" "20260801\t1\tA\tb\tc\td\te\tf\tg\t3\t4\t50,000\n" "20260801\t1\tB\tb\tc\td\te\tf\tg\t3\t4\t80,000\n").encode()), {"A": 150000, "B": 80000})
+        self.assertEqual(parse_ad_report_adgroup_costs(("20260801\t1\tA\tGA\tc\td\te\tf\tg\t1\t2\t7,910\n" "20260801\t1\tA\tGB\tc\td\te\tf\tg\t3\t4\t91,840\n" "20260801\t1\tA\tGC\tc\td\te\tf\tg\t3\t4\t77\n").encode()), {("A", "GA"): 7910, ("A", "GB"): 91840, ("A", "GC"): 77})
         self.create_workspace(1)
         health = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "건강비서"}).json
         papa = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "파파랑"}).json
@@ -1402,19 +1473,19 @@ class FinanceApiTest(unittest.TestCase):
                 preview = self.request("POST", mapping_path, {"brand_id": brand_id}).json
                 applied = self.request("POST", mapping_path, {"brand_id": brand_id, "apply": True, "from_brand_id": preview["from_brand_id"], "preview_token": preview["preview_token"]})
                 self.assertEqual(applied.status_code, 200, applied.get_data(as_text=True))
-            costs = {"A": 150000, "B": 80000, "C": 70000, "D": 40000}
+            costs = {("A", "GA"): 150000, ("B", "GB"): 80000, ("C", "GC"): 70000, ("D", "GD"): 40000}
             for _ in range(2):
-                with patch("sbrocor_finance.routes.NaverSearchAdsClient.daily_campaign_costs", return_value=costs):
+                with patch("sbrocor_finance.routes.NaverSearchAdsClient.daily_adgroup_costs", return_value=costs):
                     response = self.request("POST", f"/api/sbrocor/finance/v1/naver-accounts/{account['id']}/sync?workspace_id=1", {"start_date": "2026-08-01", "end_date": "2026-08-01"})
                 self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
                 self.assertEqual(response.json["account_total"], 340000)
                 self.assertEqual(response.json["unmapped_amount"], 40000)
         with closing(connect()) as connection:
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM naver_campaign_spend").fetchone()[0], 4)
-            self.assertEqual(connection.execute("SELECT SUM(amount_krw) FROM naver_campaign_spend").fetchone()[0], 340000)
-            self.assertEqual(connection.execute("SELECT SUM(amount_krw) FROM naver_campaign_spend WHERE brand_id=?", (health["id"],)).fetchone()[0], 230000)
-            self.assertEqual(connection.execute("SELECT SUM(amount_krw) FROM naver_campaign_spend WHERE brand_id=?", (papa["id"],)).fetchone()[0], 70000)
-            self.assertEqual(connection.execute("SELECT SUM(amount_krw) FROM naver_campaign_spend WHERE brand_id IS NULL").fetchone()[0], 40000)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM naver_adgroup_spend").fetchone()[0], 4)
+            self.assertEqual(connection.execute("SELECT SUM(amount_krw) FROM naver_adgroup_spend").fetchone()[0], 340000)
+            self.assertEqual(connection.execute("SELECT SUM(amount_krw) FROM naver_adgroup_spend WHERE brand_id=?", (health["id"],)).fetchone()[0], 230000)
+            self.assertEqual(connection.execute("SELECT SUM(amount_krw) FROM naver_adgroup_spend WHERE brand_id=?", (papa["id"],)).fetchone()[0], 70000)
+            self.assertEqual(connection.execute("SELECT SUM(amount_krw) FROM naver_adgroup_spend WHERE brand_id IS NULL").fetchone()[0], 40000)
         analysis = "/api/sbrocor/finance/v1/sales-analysis/compare?workspace_id=1&a_start=2026-08-01&a_end=2026-08-01&b_start=2026-08-01&b_end=2026-08-01"
         workspace_totals = self.request("GET", analysis).json["periods"]["a"]["totals"]
         self.assertEqual(workspace_totals["actual_advertising_spend"], 340000)
@@ -1426,6 +1497,97 @@ class FinanceApiTest(unittest.TestCase):
         self.assertEqual(papa_totals["actual_advertising_spend"], 70000)
         preview = self.request("POST", f"/api/sbrocor/finance/v1/naver-campaigns/{by_id['C']['id']}/mapping?workspace_id=1", {"brand_id": health["id"], "apply": False}).json
         self.assertEqual((preview["historical_affected_rows"], preview["historical_affected_amount"]), (1, 70000))
+
+    def test_naver_adgroup_product_attribution_refresh_sync_and_guards(self):
+        self.create_workspace(1)
+        health = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "건강비서"}).json
+        other = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "파파랑"}).json
+        pomegranate = self.request("POST", "/api/sbrocor/finance/v1/products?workspace_id=1", {"id": 101, "name": "석류정", "cost_price": 1, "brand_id": health["id"]}).json
+        probiotic = self.request("POST", "/api/sbrocor/finance/v1/products?workspace_id=1", {"id": 102, "name": "식이섬균", "cost_price": 1, "brand_id": health["id"]}).json
+        foreign = self.request("POST", "/api/sbrocor/finance/v1/products?workspace_id=1", {"id": 103, "name": "파파랑 제품", "cost_price": 1, "brand_id": other["id"]}).json
+        with patch.dict(os.environ, {"SBROCOR_NAVER_API_KEY_MAIN": "api", "SBROCOR_NAVER_SECRET_KEY_MAIN": "secret"}, clear=False):
+            account = self.request("POST", "/api/sbrocor/finance/v1/naver-accounts?workspace_id=1", {"customer_id": "999569", "account_name": "N", "credential_key": "MAIN"}).json
+            with closing(connect()) as connection:
+                cursor = connection.execute("INSERT INTO naver_campaign(workspace_id,naver_account_connection_id,campaign_id,campaign_name,status,brand_id) VALUES (1,?,'CAMP','건강비서 자사몰 파워링크','ELIGIBLE',?)", (account["id"], health["id"]))
+                campaign_row_id = cursor.lastrowid
+                connection.commit()
+            groups = [
+                {"campaign_id": "CAMP", "adgroup_id": "GA", "adgroup_name": "석류정 파워링크", "status": "ELIGIBLE"},
+                {"campaign_id": "CAMP", "adgroup_id": "GB", "adgroup_name": "자사몰 식이섬균 파워링크", "status": "ELIGIBLE"},
+            ]
+            with patch("sbrocor_finance.routes.NaverSearchAdsClient.adgroups", return_value=groups):
+                refreshed = self.request("POST", f"/api/sbrocor/finance/v1/naver-accounts/{account['id']}/adgroups/refresh?workspace_id=1")
+            self.assertEqual(refreshed.status_code, 200, refreshed.get_data(as_text=True))
+            adgroups = self.request("GET", f"/api/sbrocor/finance/v1/naver-accounts/{account['id']}/adgroups?workspace_id=1").json["items"]
+            by_id = {row["adgroup_id"]: row for row in adgroups}
+            self.assertTrue(all(row["allocation_mode"] == "unassigned" and row["product_id"] is None for row in adgroups))
+            employee = {"actor_uid": "employee", "role": "employee", "workspace_ids": [1], "permissions": ["ads"]}
+            self.assertEqual(self.request("GET", f"/api/sbrocor/finance/v1/naver-accounts/{account['id']}/adgroups?workspace_id=1", context=employee).status_code, 200)
+            self.assertEqual(self.request("POST", f"/api/sbrocor/finance/v1/naver-accounts/{account['id']}/adgroups/refresh?workspace_id=1", context=employee).status_code, 403)
+            self.assertEqual(self.request("POST", f"/api/sbrocor/finance/v1/naver-adgroups/{by_id['GA']['id']}/allocation?workspace_id=1", {"allocation_mode": "brand_common"}, context=employee).status_code, 403)
+
+            cross = self.request("POST", f"/api/sbrocor/finance/v1/naver-adgroups/{by_id['GA']['id']}/allocation?workspace_id=1", {"allocation_mode": "product", "product_id": foreign["id"]})
+            self.assertEqual(cross.status_code, 400)
+            for group_id, product in (("GA", pomegranate), ("GB", probiotic)):
+                path = f"/api/sbrocor/finance/v1/naver-adgroups/{by_id[group_id]['id']}/allocation?workspace_id=1"
+                preview = self.request("POST", path, {"allocation_mode": "product", "product_id": product["id"]}).json
+                applied = self.request("POST", path, {"allocation_mode": "product", "product_id": product["id"], "apply": True, "from_allocation_mode": preview["from_allocation_mode"], "from_product_id": preview["from_product_id"], "preview_token": preview["preview_token"]})
+                self.assertEqual(applied.status_code, 200, applied.get_data(as_text=True))
+            with patch("sbrocor_finance.routes.NaverSearchAdsClient.adgroups", return_value=groups[:1]):
+                repeated_refresh = self.request("POST", f"/api/sbrocor/finance/v1/naver-accounts/{account['id']}/adgroups/refresh?workspace_id=1")
+            self.assertEqual(repeated_refresh.status_code, 200, repeated_refresh.get_data(as_text=True))
+            refreshed_groups = {row["adgroup_id"]: row for row in self.request("GET", f"/api/sbrocor/finance/v1/naver-accounts/{account['id']}/adgroups?workspace_id=1").json["items"]}
+            self.assertEqual((refreshed_groups["GA"]["allocation_mode"], refreshed_groups["GA"]["product_id"]), ("product", pomegranate["id"]))
+            self.assertEqual((refreshed_groups["GB"]["active"], refreshed_groups["GB"]["allocation_mode"], refreshed_groups["GB"]["product_id"]), (0, "product", probiotic["id"]))
+
+            with closing(connect()) as connection:
+                connection.execute("INSERT INTO naver_campaign(workspace_id,naver_account_connection_id,campaign_id,campaign_name,status,brand_id) VALUES (1,?,'UNMAPPED','미지정 캠페인','ELIGIBLE',NULL)", (account["id"],))
+                cursor = connection.execute("INSERT INTO naver_adgroup(workspace_id,naver_account_connection_id,campaign_id,adgroup_id,adgroup_name,status,allocation_mode,active,last_seen_at) VALUES (1,?,'UNMAPPED','GU','미지정 광고그룹','ELIGIBLE','unassigned',1,CURRENT_TIMESTAMP)", (account["id"],))
+                unmapped_group_id = cursor.lastrowid
+                connection.commit()
+            campaign_unmapped = self.request("POST", f"/api/sbrocor/finance/v1/naver-adgroups/{unmapped_group_id}/allocation?workspace_id=1", {"allocation_mode": "product", "product_id": pomegranate["id"]})
+            self.assertEqual(campaign_unmapped.status_code, 400)
+            stale_path = f"/api/sbrocor/finance/v1/naver-adgroups/{by_id['GA']['id']}/allocation?workspace_id=1"
+            stale_preview = self.request("POST", stale_path, {"allocation_mode": "brand_common", "product_id": None}).json
+            with closing(connect()) as connection:
+                connection.execute("UPDATE naver_adgroup SET updated_at='changed' WHERE id=?", (by_id["GA"]["id"],)); connection.commit()
+            stale_apply = self.request("POST", stale_path, {"allocation_mode": "brand_common", "product_id": None, "apply": True, "from_allocation_mode": stale_preview["from_allocation_mode"], "from_product_id": stale_preview["from_product_id"], "preview_token": stale_preview["preview_token"]})
+            self.assertEqual(stale_apply.status_code, 409)
+            self.assertEqual(stale_apply.json["error"], "stale_preview")
+            blocked = self.request("POST", f"/api/sbrocor/finance/v1/naver-campaigns/{campaign_row_id}/mapping?workspace_id=1", {"brand_id": other["id"]})
+            self.assertEqual(blocked.status_code, 400)
+            self.assertIn("제품 매핑을 먼저 해제", blocked.json["detail"])
+
+            costs = {("CAMP", "GA"): 7910, ("CAMP", "GB"): 91840, ("CAMP", "GC"): 77}
+            with patch("sbrocor_finance.routes.NaverSearchAdsClient.daily_adgroup_costs", return_value=costs):
+                synced = self.request("POST", f"/api/sbrocor/finance/v1/naver-accounts/{account['id']}/sync?workspace_id=1", {"start_date": "2026-08-01", "end_date": "2026-08-01"})
+            self.assertEqual(synced.status_code, 200, synced.get_data(as_text=True))
+            self.assertEqual(synced.json["account_total"], 99827)
+            self.assertEqual(synced.json["product_attributed_amount"], 99750)
+            self.assertEqual(synced.json["unassigned_product_amount"], 77)
+            with closing(connect()) as connection:
+                self.assertEqual(connection.execute("SELECT SUM(amount_krw) FROM naver_adgroup_spend").fetchone()[0], 99827)
+                report_only = connection.execute("SELECT * FROM naver_adgroup WHERE adgroup_id='GC'").fetchone()
+                self.assertEqual((report_only["active"], report_only["allocation_mode"], report_only["product_id"]), (0, "unassigned", None))
+                self.assertEqual(connection.execute("SELECT SUM(amount_krw) FROM naver_adgroup_spend WHERE product_id=101").fetchone()[0], 7910)
+                self.assertEqual(connection.execute("SELECT SUM(amount_krw) FROM naver_adgroup_spend WHERE product_id=102").fetchone()[0], 91840)
+            analysis = self.request("GET", f"/api/sbrocor/finance/v1/sales-analysis/compare?workspace_id=1&brand_id={health['id']}&a_start=2026-08-01&a_end=2026-08-01&b_start=2026-08-01&b_end=2026-08-01").json
+            totals = analysis["periods"]["a"]["totals"]
+            self.assertEqual(totals["actual_advertising_spend"], 99827)
+            self.assertEqual(totals["naver_product_attribution"], {"complete": False, "unassigned_amount": 77, "brand_common_amount": 0, "direct_product_amount": 99750})
+            product_rows = {row["id"]: row for row in analysis["products"]}
+            self.assertEqual(product_rows[101]["periods"]["a"]["direct_naver_advertising_spend"], 7910)
+            self.assertEqual(product_rows[102]["periods"]["a"]["direct_naver_advertising_spend"], 91840)
+
+            # API/parser failure occurs before replacement; DB failure rolls back the deleted day.
+            with patch("sbrocor_finance.routes.NaverSearchAdsClient.daily_adgroup_costs", side_effect=NaverApiError("fixture failure")):
+                failed = self.request("POST", f"/api/sbrocor/finance/v1/naver-accounts/{account['id']}/sync?workspace_id=1", {"start_date": "2026-08-01", "end_date": "2026-08-01"})
+            self.assertEqual(failed.status_code, 502)
+            with patch("sbrocor_finance.routes.NaverSearchAdsClient.daily_adgroup_costs", return_value={("CAMP", "GA"): 1}), patch("sbrocor_finance.routes._naver_adgroup_sync_hook", side_effect=lambda stage: (_ for _ in ()).throw(RuntimeError("db failure")) if stage == "after_delete" else None):
+                with self.assertRaisesRegex(RuntimeError, "db failure"):
+                    self.request("POST", f"/api/sbrocor/finance/v1/naver-accounts/{account['id']}/sync?workspace_id=1", {"start_date": "2026-08-01", "end_date": "2026-08-01"})
+            with closing(connect()) as connection:
+                self.assertEqual(connection.execute("SELECT SUM(amount_krw) FROM naver_adgroup_spend WHERE date='2026-08-01'").fetchone()[0], 99827)
 
     def test_naver_mapping_preview_rejects_stale_spend_and_campaign_snapshots(self):
         self.create_workspace(1)
@@ -1491,7 +1653,7 @@ class FinanceApiTest(unittest.TestCase):
         naver = self.request("POST", "/api/sbrocor/finance/v1/naver-accounts?workspace_id=1", {"customer_id": "999", "account_name": "Naver", "credential_key": "N"}).json
         with closing(connect()) as connection:
             connection.execute("INSERT INTO marketing_spend(workspace_id,ad_account_connection_id,brand_id,date,channel,original_amount,currency,amount_krw,source,external_key) VALUES (1,?,?,? ,'Meta',?, 'KRW',?,'meta_api','meta:1')", (meta["id"], brand["id"], "2026-08-01", 100000, 100000))
-            connection.execute("INSERT INTO naver_campaign_spend(workspace_id,naver_account_connection_id,campaign_id,brand_id,date,amount_krw,external_key) VALUES (1,?,'C',?,'2026-08-01',50000,'naver:999:C:2026-08-01')", (naver["id"], brand["id"]))
+            connection.execute("INSERT INTO naver_adgroup_spend(workspace_id,naver_account_connection_id,campaign_id,adgroup_id,brand_id,product_id,allocation_mode,date,amount_krw,external_key) VALUES (1,?,'C','G',?,NULL,'brand_common','2026-08-01',50000,'naver:999:C:G:2026-08-01')", (naver["id"], brand["id"]))
             connection.execute("INSERT INTO naver_account_sync_day(workspace_id,naver_account_connection_id,date,total_amount_krw,campaign_count,unmapped_amount_krw,unmapped_campaign_count) VALUES (1,?,'2026-08-01',50000,1,0,0)", (naver["id"],))
             connection.commit()
         self.request("POST", "/api/sbrocor/finance/v1/manual-marketing-spend?workspace_id=1", {"date": "2026-08-01", "brand_id": brand["id"], "channel": "인플루언서", "amount_krw": 30000})
@@ -1542,6 +1704,21 @@ class FinanceApiTest(unittest.TestCase):
         good = ReportSession(official)
         self.assertEqual(NaverSearchAdsClient(Credentials("a","b","1"), session=good, poll_seconds=0).daily_cost("2026-08-01"), 500)
         self.assertEqual(good.downloaded, official)
+
+    def test_naver_official_adgroup_response_fields_are_normalized(self):
+        class Response:
+            status_code = 200
+            def json(self):
+                return [{"nccAdgroupId": "grp-1", "nccCampaignId": "cmp-1", "name": "석류정 파워링크", "status": "ELIGIBLE", "statusReason": "none"}]
+        class Session:
+            def request(self, method, url, **kwargs):
+                self.method, self.url, self.kwargs = method, url, kwargs
+                return Response()
+        session = Session()
+        result = NaverSearchAdsClient(Credentials("api", "secret", "999569"), session=session).adgroups()
+        self.assertEqual(session.method, "GET")
+        self.assertEqual(session.url, "https://api.searchad.naver.com/ncc/adgroups")
+        self.assertEqual(result, [{"adgroup_id": "grp-1", "campaign_id": "cmp-1", "adgroup_name": "석류정 파워링크", "status": "ELIGIBLE"}])
 
 
 if __name__ == "__main__":
