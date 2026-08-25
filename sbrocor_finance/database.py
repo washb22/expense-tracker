@@ -11,7 +11,7 @@ from typing import Iterator
 from .config import get_finance_database_path
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -153,6 +153,61 @@ CREATE TABLE IF NOT EXISTS manual_marketing_spend (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS naver_account_connection (
+    id INTEGER PRIMARY KEY,
+    workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE RESTRICT,
+    customer_id TEXT NOT NULL,
+    account_name TEXT NOT NULL,
+    credential_key TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
+    legacy_ad_account_connection_id INTEGER REFERENCES ad_account_connection(id) ON DELETE RESTRICT,
+    last_campaign_synced_at TEXT,
+    last_spend_synced_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(workspace_id, customer_id),
+    UNIQUE(workspace_id, legacy_ad_account_connection_id)
+);
+CREATE TABLE IF NOT EXISTS naver_campaign (
+    id INTEGER PRIMARY KEY,
+    workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE RESTRICT,
+    naver_account_connection_id INTEGER NOT NULL REFERENCES naver_account_connection(id) ON DELETE RESTRICT,
+    campaign_id TEXT NOT NULL,
+    campaign_name TEXT NOT NULL,
+    status TEXT,
+    brand_id INTEGER REFERENCES brand(id) ON DELETE RESTRICT,
+    active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
+    last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(workspace_id, naver_account_connection_id, campaign_id)
+);
+CREATE TABLE IF NOT EXISTS naver_campaign_spend (
+    id INTEGER PRIMARY KEY,
+    workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE RESTRICT,
+    naver_account_connection_id INTEGER NOT NULL REFERENCES naver_account_connection(id) ON DELETE RESTRICT,
+    campaign_id TEXT NOT NULL,
+    brand_id INTEGER REFERENCES brand(id) ON DELETE RESTRICT,
+    date TEXT NOT NULL,
+    amount_krw INTEGER NOT NULL CHECK(amount_krw >= 0),
+    external_key TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(workspace_id, external_key)
+);
+CREATE TABLE IF NOT EXISTS naver_account_sync_day (
+    id INTEGER PRIMARY KEY,
+    workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE RESTRICT,
+    naver_account_connection_id INTEGER NOT NULL REFERENCES naver_account_connection(id) ON DELETE RESTRICT,
+    date TEXT NOT NULL,
+    total_amount_krw INTEGER NOT NULL CHECK(total_amount_krw >= 0),
+    campaign_count INTEGER NOT NULL DEFAULT 0,
+    unmapped_amount_krw INTEGER NOT NULL DEFAULT 0 CHECK(unmapped_amount_krw >= 0),
+    unmapped_campaign_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(workspace_id, naver_account_connection_id, date)
+);
 CREATE TABLE IF NOT EXISTS marketing_allocation (
     id TEXT PRIMARY KEY,
     workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE RESTRICT,
@@ -180,6 +235,12 @@ CREATE INDEX IF NOT EXISTS ix_marketing_spend_brand_date ON marketing_spend(work
 CREATE INDEX IF NOT EXISTS ix_manual_spend_workspace_date ON manual_marketing_spend(workspace_id, date);
 CREATE INDEX IF NOT EXISTS ix_manual_spend_workspace_batch ON manual_marketing_spend(workspace_id, batch_id);
 CREATE INDEX IF NOT EXISTS ix_manual_spend_brand_product_date ON manual_marketing_spend(workspace_id, brand_id, product_id, date);
+CREATE INDEX IF NOT EXISTS ix_naver_account_workspace_active ON naver_account_connection(workspace_id, active);
+CREATE INDEX IF NOT EXISTS ix_naver_campaign_account_active ON naver_campaign(workspace_id, naver_account_connection_id, active);
+CREATE INDEX IF NOT EXISTS ix_naver_campaign_brand ON naver_campaign(workspace_id, brand_id, active);
+CREATE INDEX IF NOT EXISTS ix_naver_campaign_spend_date ON naver_campaign_spend(workspace_id, date);
+CREATE INDEX IF NOT EXISTS ix_naver_campaign_spend_brand_date ON naver_campaign_spend(workspace_id, brand_id, date);
+CREATE INDEX IF NOT EXISTS ix_naver_sync_day_date ON naver_account_sync_day(workspace_id, date);
 CREATE INDEX IF NOT EXISTS ix_brand_workspace_active ON brand(workspace_id, active, name);
 CREATE INDEX IF NOT EXISTS ix_allocation_workspace_transaction ON marketing_allocation(workspace_id, transaction_id);
 CREATE INDEX IF NOT EXISTS ix_allocation_workspace_brand ON marketing_allocation(workspace_id, brand_id);
@@ -207,6 +268,48 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         )
 
 
+def _schema_statements(sql: str) -> list[str]:
+    return [statement.strip() for statement in sql.split(";") if statement.strip()]
+
+
+def _is_v5_statement(statement: str) -> bool:
+    normalized = " ".join(statement.lower().split())
+    return normalized.startswith("create table if not exists naver_") or normalized.startswith(
+        "create index if not exists ix_naver_"
+    )
+
+
+def _v5_migration_hook(_stage: str) -> None:
+    """Fault-injection seam used by migration tests."""
+
+
+def _migrate_v5(connection: sqlite3.Connection) -> None:
+    current = int(connection.execute("SELECT COALESCE(MAX(version),0) FROM schema_version").fetchone()[0])
+    if current >= 5:
+        return
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        for statement in _schema_statements(SCHEMA_SQL):
+            if _is_v5_statement(statement):
+                connection.execute(statement)
+        _v5_migration_hook("after_ddl")
+        _v5_migration_hook("before_metadata")
+        # Copy connection metadata only. Legacy financial rows remain untouched.
+        connection.execute(
+            """INSERT OR IGNORE INTO naver_account_connection
+               (workspace_id,customer_id,account_name,credential_key,active,legacy_ad_account_connection_id,
+                last_spend_synced_at,created_at,updated_at)
+               SELECT workspace_id,account_id,account_name,credential_key,active,id,last_synced_at,created_at,updated_at
+               FROM ad_account_connection WHERE platform='naver'"""
+        )
+        _v5_migration_hook("before_version")
+        connection.execute("INSERT OR IGNORE INTO schema_version(version) VALUES (5)")
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+
+
 def connect(path: Path | None = None) -> sqlite3.Connection:
     database_path = (path or get_finance_database_path()).resolve()
     # Re-run the central guard even when a caller passes a path explicitly.
@@ -224,10 +327,21 @@ def initialize_database(path: Path | None = None) -> Path:
     database_path.parent.mkdir(parents=True, exist_ok=True)
     with closing(connect(database_path)) as connection:
         connection.execute("PRAGMA journal_mode=WAL")
-        connection.executescript(SCHEMA_SQL)
+        existing = bool(connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").fetchone())
+        if existing:
+            base_schema = ";\n".join(
+                statement for statement in _schema_statements(SCHEMA_SQL) if not _is_v5_statement(statement)
+            ) + ";"
+            connection.executescript(base_schema)
+        else:
+            connection.executescript(SCHEMA_SQL)
         _apply_additive_migrations(connection)
-        connection.execute("INSERT OR IGNORE INTO schema_version(version) VALUES (?)", (SCHEMA_VERSION,))
         connection.commit()
+        if existing:
+            _migrate_v5(connection)
+        else:
+            connection.execute("INSERT OR IGNORE INTO schema_version(version) VALUES (?)", (SCHEMA_VERSION,))
+            connection.commit()
     return database_path
 
 
