@@ -284,7 +284,7 @@ def _public_naver_account(account: sqlite3.Row | dict, connection: sqlite3.Conne
         (item["workspace_id"], item["id"]),
     ).fetchone()[0])
     item["unmapped_campaign_count"] = int(connection.execute(
-        "SELECT COUNT(*) FROM naver_campaign WHERE workspace_id=? AND naver_account_connection_id=? AND brand_id IS NULL AND active=1",
+        "SELECT COUNT(*) FROM naver_campaign WHERE workspace_id=? AND naver_account_connection_id=? AND brand_id IS NULL AND active=1 AND archived=0",
         (item["workspace_id"], item["id"]),
     ).fetchone()[0])
     return item
@@ -677,6 +677,26 @@ def naver_campaigns(account_id: int):
         return jsonify(items=[dict(row) for row in rows])
 
 
+@finance_blueprint.patch("/naver-campaigns/<int:campaign_row_id>/archive")
+@require_server_hmac
+def archive_naver_campaign(campaign_row_id: int):
+    workspace_id = _workspace_id(); _authorize("ads", workspace_id, admin_only=True); payload = _json_payload()
+    archived = payload.get("archived")
+    if not isinstance(archived, bool):
+        raise ValueError("archived must be a boolean")
+    with finance_connection() as connection:
+        cursor = connection.execute(
+            "UPDATE naver_campaign SET archived=?,archived_at=CASE WHEN ?=1 THEN CURRENT_TIMESTAMP ELSE NULL END,updated_at=CURRENT_TIMESTAMP "
+            "WHERE id=? AND workspace_id=?",
+            (int(archived), int(archived), campaign_row_id, workspace_id),
+        )
+        if not cursor.rowcount:
+            raise LookupError("Naver campaign not found")
+        connection.commit()
+        row = connection.execute("SELECT * FROM naver_campaign WHERE id=? AND workspace_id=?", (campaign_row_id, workspace_id)).fetchone()
+        return jsonify(dict(row))
+
+
 @finance_blueprint.post("/naver-accounts/<int:account_id>/campaigns/refresh")
 @require_server_hmac
 def refresh_naver_campaigns(account_id: int):
@@ -731,6 +751,26 @@ def naver_adgroups(account_id: int):
             (workspace_id, account_id),
         ).fetchall()
         return jsonify(items=[dict(row) for row in rows])
+
+
+@finance_blueprint.patch("/naver-adgroups/<int:adgroup_row_id>/archive")
+@require_server_hmac
+def archive_naver_adgroup(adgroup_row_id: int):
+    workspace_id = _workspace_id(); _authorize("ads", workspace_id, admin_only=True); payload = _json_payload()
+    archived = payload.get("archived")
+    if not isinstance(archived, bool):
+        raise ValueError("archived must be a boolean")
+    with finance_connection() as connection:
+        cursor = connection.execute(
+            "UPDATE naver_adgroup SET archived=?,archived_at=CASE WHEN ?=1 THEN CURRENT_TIMESTAMP ELSE NULL END,updated_at=CURRENT_TIMESTAMP "
+            "WHERE id=? AND workspace_id=?",
+            (int(archived), int(archived), adgroup_row_id, workspace_id),
+        )
+        if not cursor.rowcount:
+            raise LookupError("Naver ad group not found")
+        connection.commit()
+        row = connection.execute("SELECT * FROM naver_adgroup WHERE id=? AND workspace_id=?", (adgroup_row_id, workspace_id)).fetchone()
+        return jsonify(dict(row))
 
 
 @finance_blueprint.post("/naver-accounts/<int:account_id>/adgroups/refresh")

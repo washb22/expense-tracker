@@ -11,7 +11,7 @@ from typing import Iterator
 from .config import get_finance_database_path
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -177,6 +177,8 @@ CREATE TABLE IF NOT EXISTS naver_campaign (
     status TEXT,
     brand_id INTEGER REFERENCES brand(id) ON DELETE RESTRICT,
     active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
+    archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0, 1)),
+    archived_at TEXT,
     last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -206,6 +208,8 @@ CREATE TABLE IF NOT EXISTS naver_adgroup (
     allocation_mode TEXT NOT NULL DEFAULT 'unassigned' CHECK(allocation_mode IN ('unassigned','brand_common','product')),
     product_id INTEGER REFERENCES product(id) ON DELETE RESTRICT,
     active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
+    archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0, 1)),
+    archived_at TEXT,
     last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -398,6 +402,33 @@ def _migrate_v6(connection: sqlite3.Connection) -> None:
         raise
 
 
+def _v7_migration_hook(_stage: str) -> None:
+    """Fault-injection seam used by migration tests."""
+
+
+def _migrate_v7(connection: sqlite3.Connection) -> None:
+    current = int(connection.execute("SELECT COALESCE(MAX(version),0) FROM schema_version").fetchone()[0])
+    if current >= 7:
+        return
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        for table in ("naver_campaign", "naver_adgroup"):
+            columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+            if "archived" not in columns:
+                connection.execute(
+                    f"ALTER TABLE {table} ADD COLUMN archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))"
+                )
+            if "archived_at" not in columns:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN archived_at TEXT")
+        _v7_migration_hook("after_ddl")
+        _v7_migration_hook("before_version")
+        connection.execute("INSERT OR IGNORE INTO schema_version(version) VALUES (7)")
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+
+
 def connect(path: Path | None = None) -> sqlite3.Connection:
     database_path = (path or get_finance_database_path()).resolve()
     # Re-run the central guard even when a caller passes a path explicitly.
@@ -429,6 +460,7 @@ def initialize_database(path: Path | None = None) -> Path:
         if existing:
             _migrate_v5(connection)
             _migrate_v6(connection)
+            _migrate_v7(connection)
         else:
             connection.execute("INSERT OR IGNORE INTO schema_version(version) VALUES (?)", (SCHEMA_VERSION,))
             connection.commit()
