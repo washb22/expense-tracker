@@ -445,7 +445,7 @@ class FinanceRepository:
             ).fetchone()[0])
             if product_id is None:
                 actual_ad += int(self.connection.execute(
-                    "SELECT COALESCE(SUM(ns.amount_krw),0) FROM naver_campaign_spend ns WHERE ns.workspace_id=? "
+                    "SELECT COALESCE(SUM(ns.amount_krw),0) FROM naver_adgroup_spend ns WHERE ns.workspace_id=? "
                     "AND substr(ns.date,1,10)>=? AND substr(ns.date,1,10)<=?" + (" AND ns.brand_id=?" if brand_id is not None else ""),
                     [workspace_id, start_date, end_date, *( [brand_id] if brand_id is not None else [] )],
                 ).fetchone()[0])
@@ -467,6 +467,12 @@ class FinanceRepository:
                 (" AND m.product_id=?" if product_id is not None else " AND m.brand_id=?" if brand_id is not None else ""),
                 [workspace_id, start_date, end_date, *( [product_id] if product_id is not None else [brand_id] if brand_id is not None else [] )],
             ).fetchone()[0])
+            direct_ad += int(self.connection.execute(
+                "SELECT COALESCE(SUM(ns.amount_krw),0) FROM naver_adgroup_spend ns WHERE ns.workspace_id=? "
+                "AND substr(ns.date,1,10)>=? AND substr(ns.date,1,10)<=? AND ns.product_id IS NOT NULL" +
+                (" AND ns.product_id=?" if product_id is not None else " AND ns.brand_id=?" if brand_id is not None else ""),
+                [workspace_id, start_date, end_date, *( [product_id] if product_id is not None else [brand_id] if brand_id is not None else [] )],
+            ).fetchone()[0])
             brand_common_ad = int(self.connection.execute(
                 "SELECT COALESCE(SUM(ms.amount_krw),0) FROM marketing_spend ms "
                 "JOIN ad_account_connection ac ON ac.id=ms.ad_account_connection_id AND ac.workspace_id=ms.workspace_id "
@@ -482,8 +488,8 @@ class FinanceRepository:
             ).fetchone()[0])
             if product_id is None:
                 brand_common_ad += int(self.connection.execute(
-                    "SELECT COALESCE(SUM(ns.amount_krw),0) FROM naver_campaign_spend ns WHERE ns.workspace_id=? "
-                    "AND substr(ns.date,1,10)>=? AND substr(ns.date,1,10)<=?" + (" AND ns.brand_id=?" if brand_id is not None else ""),
+                    "SELECT COALESCE(SUM(ns.amount_krw),0) FROM naver_adgroup_spend ns WHERE ns.workspace_id=? "
+                    "AND substr(ns.date,1,10)>=? AND substr(ns.date,1,10)<=? AND ns.allocation_mode='brand_common'" + (" AND ns.brand_id=?" if brand_id is not None else ""),
                     [workspace_id, start_date, end_date, *( [brand_id] if brand_id is not None else [] )],
                 ).fetchone()[0])
             if product_id is not None:
@@ -530,8 +536,16 @@ class FinanceRepository:
             ).fetchone()[0])
             naver_unmapped = self.connection.execute(
                 "SELECT COALESCE(SUM(amount_krw),0) amount,COUNT(DISTINCT campaign_id) campaigns "
-                "FROM naver_campaign_spend WHERE workspace_id=? AND date>=? AND date<=? AND brand_id IS NULL",
+                "FROM naver_adgroup_spend WHERE workspace_id=? AND date>=? AND date<=? AND brand_id IS NULL",
                 (workspace_id, start_date, end_date),
+            ).fetchone()
+            naver_product_attribution = self.connection.execute(
+                "SELECT COALESCE(SUM(CASE WHEN allocation_mode='product' THEN amount_krw ELSE 0 END),0) direct_product_amount,"
+                "COALESCE(SUM(CASE WHEN allocation_mode='brand_common' THEN amount_krw ELSE 0 END),0) brand_common_amount,"
+                "COALESCE(SUM(CASE WHEN allocation_mode='unassigned' AND brand_id IS NOT NULL THEN amount_krw ELSE 0 END),0) unassigned_amount "
+                "FROM naver_adgroup_spend WHERE workspace_id=? AND date>=? AND date<=?" +
+                (" AND brand_id=?" if brand_id is not None else ""),
+                [workspace_id, start_date, end_date, *( [brand_id] if brand_id is not None else [] )],
             ).fetchone()
             unconverted = [row[0] for row in self.connection.execute(
                 "SELECT DISTINCT ms.currency FROM marketing_spend ms JOIN ad_account_connection ac ON ac.id=ms.ad_account_connection_id "
@@ -547,6 +561,11 @@ class FinanceRepository:
             if product_id is not None:
                 direct_spend_rows += int(self.connection.execute(
                     "SELECT COUNT(*) FROM manual_marketing_spend WHERE workspace_id=? AND substr(date,1,10)>=? AND substr(date,1,10)<=? AND product_id=?",
+                    [workspace_id, start_date, end_date, product_id],
+                ).fetchone()[0])
+                direct_spend_rows += int(self.connection.execute(
+                    "SELECT COUNT(*) FROM naver_adgroup_spend WHERE workspace_id=? AND date>=? AND date<=? "
+                    "AND allocation_mode='product' AND product_id=?",
                     [workspace_id, start_date, end_date, product_id],
                 ).fetchone()[0])
             meta_expected = days * meta_accounts
@@ -600,6 +619,12 @@ class FinanceRepository:
                     "unmapped_amount": int(naver_unmapped["amount"] or 0),
                     "unmapped_campaign_count": int(naver_unmapped["campaigns"] or 0),
                 },
+                "naver_product_attribution": {
+                    "complete": int(naver_product_attribution["unassigned_amount"] or 0) == 0,
+                    "unassigned_amount": int(naver_product_attribution["unassigned_amount"] or 0),
+                    "brand_common_amount": int(naver_product_attribution["brand_common_amount"] or 0),
+                    "direct_product_amount": int(naver_product_attribution["direct_product_amount"] or 0),
+                },
                 "currency_complete": currency_complete,
                 "unconverted_currencies": unconverted,
             })
@@ -626,6 +651,17 @@ class FinanceRepository:
                 current = grouped_ads.setdefault(int(row["product_id"]), {"product_id": row["product_id"], "amount": 0, "spend_rows": 0})
                 current["amount"] = int(current["amount"] or 0) + int(row["amount"] or 0)
                 current["spend_rows"] = int(current["spend_rows"] or 0) + int(row["spend_rows"] or 0)
+            for row in self.connection.execute(
+                "SELECT ns.product_id,SUM(ns.amount_krw) amount,COUNT(*) spend_rows FROM naver_adgroup_spend ns "
+                "WHERE ns.workspace_id=? AND ns.date>=? AND ns.date<=? AND ns.allocation_mode='product' AND ns.product_id IS NOT NULL" +
+                (" AND ns.product_id=?" if product_id is not None else " AND ns.brand_id=?" if brand_id is not None else "") +
+                " GROUP BY ns.product_id",
+                [workspace_id, start_date, end_date, *( [product_id] if product_id is not None else [brand_id] if brand_id is not None else [] )],
+            ):
+                current = grouped_ads.setdefault(int(row["product_id"]), {"product_id": row["product_id"], "amount": 0, "spend_rows": 0, "naver_amount": 0})
+                current["amount"] = int(current["amount"] or 0) + int(row["amount"] or 0)
+                current["spend_rows"] = int(current["spend_rows"] or 0) + int(row["spend_rows"] or 0)
+                current["naver_amount"] = int(row["amount"] or 0)
             for item_id, item in products_by_id.items():
                 values = grouped_sales.get(item_id, {"revenue": 0, "quantity": 0, "sales_profit": 0})
                 spend = grouped_ads.get(item_id)
@@ -635,7 +671,10 @@ class FinanceRepository:
                     **values,
                     "direct_advertising_cost": direct if direct_available else None,
                     "direct_advertising_available": direct_available,
+                    "direct_naver_advertising_spend": int(spend.get("naver_amount", 0)) if spend else 0,
+                    "profit_after_direct_advertising": int(values["sales_profit"]) - direct if direct_available else None,
                     "profit_after_advertising": int(values["sales_profit"]) - direct if direct_available else None,
+                    "attribution_complete": int(naver_product_attribution["unassigned_amount"] or 0) == 0 and int(naver_product_attribution["brand_common_amount"] or 0) == 0,
                 }
 
             daily_sales = {row["date"]: dict(row) for row in self.connection.execute(
@@ -651,9 +690,16 @@ class FinanceRepository:
             )}
             if product_id is None:
                 for row in self.connection.execute(
-                    "SELECT date,SUM(amount_krw) amount FROM naver_campaign_spend WHERE workspace_id=? AND date>=? AND date<=?" +
+                    "SELECT date,SUM(amount_krw) amount FROM naver_adgroup_spend WHERE workspace_id=? AND date>=? AND date<=?" +
                     (" AND brand_id=?" if brand_id is not None else "") + " GROUP BY date",
                     [workspace_id, start_date, end_date, *( [brand_id] if brand_id is not None else [] )],
+                ):
+                    daily_ads[row["date"]] = daily_ads.get(row["date"], 0) + int(row["amount"] or 0)
+            else:
+                for row in self.connection.execute(
+                    "SELECT date,SUM(amount_krw) amount FROM naver_adgroup_spend WHERE workspace_id=? AND date>=? AND date<=? "
+                    "AND allocation_mode='product' AND product_id=? GROUP BY date",
+                    [workspace_id, start_date, end_date, product_id],
                 ):
                     daily_ads[row["date"]] = daily_ads.get(row["date"], 0) + int(row["amount"] or 0)
             for row in self.connection.execute(
@@ -677,9 +723,17 @@ class FinanceRepository:
             channel_map = {row["name"]: int(row["amount"] or 0) for row in channels}
             if product_id is None:
                 naver_channel = int(self.connection.execute(
-                    "SELECT COALESCE(SUM(amount_krw),0) FROM naver_campaign_spend WHERE workspace_id=? AND date>=? AND date<=?" +
+                    "SELECT COALESCE(SUM(amount_krw),0) FROM naver_adgroup_spend WHERE workspace_id=? AND date>=? AND date<=?" +
                     (" AND brand_id=?" if brand_id is not None else ""),
                     [workspace_id, start_date, end_date, *( [brand_id] if brand_id is not None else [] )],
+                ).fetchone()[0])
+                if naver_channel:
+                    channel_map["네이버"] = channel_map.get("네이버", 0) + naver_channel
+            else:
+                naver_channel = int(self.connection.execute(
+                    "SELECT COALESCE(SUM(amount_krw),0) FROM naver_adgroup_spend WHERE workspace_id=? AND date>=? AND date<=? "
+                    "AND allocation_mode='product' AND product_id=?",
+                    [workspace_id, start_date, end_date, product_id],
                 ).fetchone()[0])
                 if naver_channel:
                     channel_map["네이버"] = channel_map.get("네이버", 0) + naver_channel
