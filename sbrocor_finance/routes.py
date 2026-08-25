@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import sqlite3
+import hashlib
 import io
+import json
 import logging
 import os
 import re
@@ -34,6 +36,51 @@ class MetaApiError(Exception):
         self.detail = detail
         self.meta_code = meta_code
         self.meta_subcode = meta_subcode
+
+
+class StalePreviewError(Exception):
+    """The approved campaign attribution snapshot changed before apply."""
+
+
+def _campaign_mapping_snapshot(
+    connection: sqlite3.Connection, campaign: sqlite3.Row, to_brand_id: int | None
+) -> dict:
+    rows = connection.execute(
+        "SELECT id,date,brand_id,amount_krw,updated_at FROM naver_campaign_spend "
+        "WHERE workspace_id=? AND naver_account_connection_id=? AND campaign_id=? AND brand_id IS NOT ? "
+        "ORDER BY id,date",
+        (
+            campaign["workspace_id"],
+            campaign["naver_account_connection_id"],
+            campaign["campaign_id"],
+            to_brand_id,
+        ),
+    ).fetchall()
+    snapshot = {
+        "campaign": {
+            "id": campaign["id"],
+            "campaign_id": campaign["campaign_id"],
+            "brand_id": campaign["brand_id"],
+            "updated_at": campaign["updated_at"],
+        },
+        "to_brand_id": to_brand_id,
+        "spend": [
+            {
+                "id": row["id"],
+                "date": row["date"],
+                "brand_id": row["brand_id"],
+                "amount_krw": row["amount_krw"],
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ],
+    }
+    encoded = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    return {
+        "preview_token": hashlib.sha256(encoded).hexdigest(),
+        "historical_affected_rows": len(rows),
+        "historical_affected_amount": sum(int(row["amount_krw"] or 0) for row in rows),
+    }
 
 
 def _without_access_token(url: str) -> str:
@@ -302,6 +349,11 @@ def _not_found(error):
 @finance_blueprint.errorhandler(sqlite3.IntegrityError)
 def _conflict(error):
     return jsonify(error="integrity_error", detail=str(error)), 409
+
+
+@finance_blueprint.errorhandler(StalePreviewError)
+def _stale_preview(_error):
+    return jsonify(error="stale_preview", detail="데이터가 변경되었습니다. 다시 미리보기 후 확인해주세요."), 409
 
 
 @finance_blueprint.errorhandler(PermissionError)
@@ -590,18 +642,28 @@ def map_naver_campaign(campaign_row_id: int):
     else: brand_id = int(brand_id)
     apply = payload.get("apply") is True
     with finance_connection() as connection:
-        campaign = connection.execute("SELECT * FROM naver_campaign WHERE id=? AND workspace_id=?", (campaign_row_id, workspace_id)).fetchone()
-        if not campaign: raise LookupError("Naver campaign not found")
         if brand_id is not None and not connection.execute("SELECT 1 FROM brand WHERE id=? AND workspace_id=?", (brand_id, workspace_id)).fetchone():
             raise ValueError("campaign brand must belong to the same workspace")
-        affected = connection.execute(
-            "SELECT COUNT(*) row_count,COALESCE(SUM(amount_krw),0) amount FROM naver_campaign_spend WHERE workspace_id=? AND naver_account_connection_id=? AND campaign_id=? AND brand_id IS NOT ?",
-            (workspace_id, campaign["naver_account_connection_id"], campaign["campaign_id"], brand_id),
-        ).fetchone()
-        preview = {"campaign_id": campaign["campaign_id"], "from_brand_id": campaign["brand_id"], "to_brand_id": brand_id, "historical_affected_rows": int(affected["row_count"]), "historical_affected_amount": int(affected["amount"])}
-        if not apply: return jsonify(dry_run=True, **preview)
+        if not apply:
+            campaign = connection.execute("SELECT * FROM naver_campaign WHERE id=? AND workspace_id=?", (campaign_row_id, workspace_id)).fetchone()
+            if not campaign: raise LookupError("Naver campaign not found")
+            snapshot = _campaign_mapping_snapshot(connection, campaign, brand_id)
+            return jsonify(dry_run=True, campaign_id=campaign["campaign_id"], from_brand_id=campaign["brand_id"], to_brand_id=brand_id, **snapshot)
+        if "from_brand_id" not in payload:
+            raise ValueError("from_brand_id is required")
+        expected_from = payload.get("from_brand_id")
+        expected_from = None if expected_from in (None, "") else int(expected_from)
+        expected_token = str(payload.get("preview_token") or "")
+        if not expected_token:
+            raise ValueError("preview_token is required")
         try:
             connection.execute("BEGIN IMMEDIATE")
+            campaign = connection.execute("SELECT * FROM naver_campaign WHERE id=? AND workspace_id=?", (campaign_row_id, workspace_id)).fetchone()
+            if not campaign: raise LookupError("Naver campaign not found")
+            snapshot = _campaign_mapping_snapshot(connection, campaign, brand_id)
+            if campaign["brand_id"] != expected_from or snapshot["preview_token"] != expected_token:
+                raise StalePreviewError()
+            preview = {"campaign_id": campaign["campaign_id"], "from_brand_id": campaign["brand_id"], "to_brand_id": brand_id, **snapshot}
             connection.execute("UPDATE naver_campaign SET brand_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?", (brand_id, campaign_row_id, workspace_id))
             connection.execute("UPDATE naver_campaign_spend SET brand_id=?,updated_at=CURRENT_TIMESTAMP WHERE workspace_id=? AND naver_account_connection_id=? AND campaign_id=?", (brand_id, workspace_id, campaign["naver_account_connection_id"], campaign["campaign_id"]))
             connection.commit()

@@ -15,12 +15,14 @@ import requests
 from flask import Flask
 
 from sbrocor_finance import finance_blueprint
+from sbrocor_finance import database as finance_database
 from sbrocor_finance.auth import sign_request
 from sbrocor_finance.config import FinanceConfigurationError, get_finance_database_path
 from sbrocor_finance.database import connect, initialize_database
 from sbrocor_finance.repository import FinanceRepository
 from sbrocor_finance.service import FinanceService
 from sbrocor_finance.naver_search_ads import Credentials, NaverApiError, NaverSearchAdsClient, generate_signature, parse_ad_report_cost, parse_ad_report_campaign_costs
+from ops import cleanup_legacy_naver_spend
 
 
 SECRET_TEXT = "fixture-secret-that-is-at-least-thirty-two-bytes"
@@ -911,6 +913,105 @@ class FinanceApiTest(unittest.TestCase):
             self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
 
+    def test_v4_to_v5_migration_failure_is_atomic_and_rerunnable(self):
+        for failure_stage in ("after_ddl", "before_metadata", "before_version"):
+            with self.subTest(stage=failure_stage):
+                path = Path(self.tempdir.name) / f"atomic-{failure_stage}.db"
+                initialize_database(path)
+                with closing(connect(path)) as connection:
+                    connection.execute("INSERT INTO workspace(id,name) VALUES (1,'W')")
+                    connection.execute("INSERT INTO brand(id,workspace_id,name) VALUES (1,1,'B')")
+                    connection.execute("INSERT INTO finance_transaction(id,workspace_id,date,merchant,amount,category) VALUES ('t',1,'2026-08-01','m',123,'광고비')")
+                    connection.executescript("""
+                        DROP INDEX ix_naver_sync_day_date;
+                        DROP INDEX ix_naver_campaign_spend_brand_date;
+                        DROP INDEX ix_naver_campaign_spend_date;
+                        DROP INDEX ix_naver_campaign_brand;
+                        DROP INDEX ix_naver_campaign_account_active;
+                        DROP INDEX ix_naver_account_workspace_active;
+                        DROP TABLE naver_account_sync_day;
+                        DROP TABLE naver_campaign_spend;
+                        DROP TABLE naver_campaign;
+                        DROP TABLE naver_account_connection;
+                        DELETE FROM schema_version WHERE version=5;
+                        INSERT OR IGNORE INTO schema_version(version) VALUES (4);
+                    """)
+                    connection.commit()
+                def fail(stage):
+                    if stage == failure_stage:
+                        raise RuntimeError("injected migration failure")
+                with patch("sbrocor_finance.database._v5_migration_hook", side_effect=fail):
+                    with self.assertRaisesRegex(RuntimeError, "injected migration failure"):
+                        initialize_database(path)
+                with closing(connect(path)) as connection:
+                    self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 4)
+                    tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                    self.assertFalse({"naver_account_connection", "naver_campaign", "naver_campaign_spend", "naver_account_sync_day"} & tables)
+                    self.assertEqual(tuple(connection.execute("SELECT COUNT(*),SUM(amount) FROM finance_transaction").fetchone()), (1, 123))
+                initialize_database(path)
+                initialize_database(path)
+                with closing(connect(path)) as connection:
+                    self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 5)
+                    self.assertEqual(tuple(connection.execute("SELECT COUNT(*),SUM(amount) FROM finance_transaction").fetchone()), (1, 123))
+                    self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+
+    def test_legacy_naver_cleanup_is_exact_fail_closed_and_rolls_back(self):
+        self.create_workspace(1)
+        brand = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "Legacy"}).json
+        account = self.request("POST", "/api/sbrocor/finance/v1/ad-accounts?workspace_id=1", {"brand_id": brand["id"], "platform": "naver", "account_id": "999569", "account_name": "Legacy", "currency": "KRW", "credential_key": "N"}).json
+        amounts = [18_000] * 23 + [20_846]
+        with closing(connect()) as connection:
+            for day, amount in enumerate(amounts, 1):
+                connection.execute(
+                    "INSERT INTO marketing_spend(workspace_id,ad_account_connection_id,brand_id,date,channel,original_amount,currency,amount_krw,source,external_key) VALUES (1,?,?,?,'네이버',?,'KRW',?,'naver_api',?)",
+                    (account["id"], brand["id"], f"2026-08-{day:02d}", amount, amount, f"legacy-{day}"),
+                )
+            connection.commit()
+        preview = cleanup_legacy_naver_spend.cleanup(self.db_path, expected_target=self.db_path)
+        self.assertEqual((preview["row_count"], preview["total_amount"], preview["min_date"], preview["max_date"], preview["customer_id"]), (24, 434846, "2026-08-01", "2026-08-24", "999569"))
+        with patch("ops.cleanup_legacy_naver_spend._after_delete_hook", side_effect=RuntimeError("rollback")):
+            with self.assertRaisesRegex(RuntimeError, "rollback"):
+                cleanup_legacy_naver_spend.cleanup(self.db_path, apply=True, confirmation=cleanup_legacy_naver_spend.CONFIRMATION, expected_target=self.db_path)
+        with closing(connect()) as connection:
+            self.assertEqual(tuple(connection.execute("SELECT COUNT(*),SUM(amount_krw) FROM marketing_spend WHERE source='naver_api'").fetchone()), (24, 434846))
+            connection.execute("UPDATE marketing_spend SET amount_krw=amount_krw+1 WHERE external_key='legacy-1'")
+            connection.commit()
+        with self.assertRaises(cleanup_legacy_naver_spend.CleanupRefused):
+            cleanup_legacy_naver_spend.cleanup(self.db_path, apply=True, confirmation=cleanup_legacy_naver_spend.CONFIRMATION, expected_target=self.db_path)
+        with closing(connect()) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM marketing_spend WHERE source='naver_api'").fetchone()[0], 24)
+            connection.execute("UPDATE marketing_spend SET amount_krw=amount_krw-1 WHERE external_key='legacy-1'")
+            connection.execute("UPDATE ad_account_connection SET account_id='wrong' WHERE id=?", (account["id"],))
+            connection.commit()
+        with self.assertRaises(cleanup_legacy_naver_spend.CleanupRefused):
+            cleanup_legacy_naver_spend.cleanup(self.db_path, expected_target=self.db_path)
+        with closing(connect()) as connection:
+            connection.execute("UPDATE ad_account_connection SET account_id='999569' WHERE id=?", (account["id"],))
+            connection.execute("UPDATE marketing_spend SET date='2026-07-31' WHERE external_key='legacy-1'")
+            connection.commit()
+        with self.assertRaises(cleanup_legacy_naver_spend.CleanupRefused):
+            cleanup_legacy_naver_spend.cleanup(self.db_path, expected_target=self.db_path)
+        with closing(connect()) as connection:
+            connection.execute("UPDATE marketing_spend SET date='2026-08-01' WHERE external_key='legacy-1'")
+            connection.execute("DELETE FROM marketing_spend WHERE external_key='legacy-24'")
+            connection.commit()
+        with self.assertRaises(cleanup_legacy_naver_spend.CleanupRefused):
+            cleanup_legacy_naver_spend.cleanup(self.db_path, expected_target=self.db_path)
+        with closing(connect()) as connection:
+            connection.execute(
+                "INSERT INTO marketing_spend(workspace_id,ad_account_connection_id,brand_id,date,channel,original_amount,currency,amount_krw,source,external_key) VALUES (1,?,?,?,'네이버',?,'KRW',?,'naver_api','legacy-24')",
+                (account["id"], brand["id"], "2026-08-24", 20846, 20846),
+            )
+            connection.commit()
+        applied = cleanup_legacy_naver_spend.cleanup(self.db_path, apply=True, confirmation=cleanup_legacy_naver_spend.CONFIRMATION, expected_target=self.db_path)
+        self.assertEqual((applied["deleted_rows"], applied["post_count"]), (24, 0))
+        with closing(connect()) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM marketing_spend WHERE source='naver_api'").fetchone()[0], 0)
+        tracker = Path(self.tempdir.name) / "tracker.db"
+        tracker.touch()
+        with self.assertRaises(cleanup_legacy_naver_spend.CleanupRefused):
+            cleanup_legacy_naver_spend.cleanup(tracker, expected_target=tracker)
+
     def test_multi_ad_account_sync_is_idempotent_and_drives_actual_spend_analysis(self):
         self.create_workspace(1)
         brand_a = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "파파랑"}).json
@@ -1297,7 +1398,10 @@ class FinanceApiTest(unittest.TestCase):
             campaigns = self.request("GET", f"/api/sbrocor/finance/v1/naver-accounts/{account['id']}/campaigns?workspace_id=1").json["items"]
             by_id = {item["campaign_id"]: item for item in campaigns}
             for campaign_id, brand_id in (("A", health["id"]), ("B", health["id"]), ("C", papa["id"])):
-                self.request("POST", f"/api/sbrocor/finance/v1/naver-campaigns/{by_id[campaign_id]['id']}/mapping?workspace_id=1", {"brand_id": brand_id, "apply": True})
+                mapping_path = f"/api/sbrocor/finance/v1/naver-campaigns/{by_id[campaign_id]['id']}/mapping?workspace_id=1"
+                preview = self.request("POST", mapping_path, {"brand_id": brand_id}).json
+                applied = self.request("POST", mapping_path, {"brand_id": brand_id, "apply": True, "from_brand_id": preview["from_brand_id"], "preview_token": preview["preview_token"]})
+                self.assertEqual(applied.status_code, 200, applied.get_data(as_text=True))
             costs = {"A": 150000, "B": 80000, "C": 70000, "D": 40000}
             for _ in range(2):
                 with patch("sbrocor_finance.routes.NaverSearchAdsClient.daily_campaign_costs", return_value=costs):
@@ -1322,6 +1426,39 @@ class FinanceApiTest(unittest.TestCase):
         self.assertEqual(papa_totals["actual_advertising_spend"], 70000)
         preview = self.request("POST", f"/api/sbrocor/finance/v1/naver-campaigns/{by_id['C']['id']}/mapping?workspace_id=1", {"brand_id": health["id"], "apply": False}).json
         self.assertEqual((preview["historical_affected_rows"], preview["historical_affected_amount"]), (1, 70000))
+
+    def test_naver_mapping_preview_rejects_stale_spend_and_campaign_snapshots(self):
+        self.create_workspace(1)
+        first = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "First"}).json
+        second = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "Second"}).json
+        account = self.request("POST", "/api/sbrocor/finance/v1/naver-accounts?workspace_id=1", {"customer_id": "999569", "account_name": "N", "credential_key": "N"}).json
+        with closing(connect()) as connection:
+            cursor = connection.execute("INSERT INTO naver_campaign(workspace_id,naver_account_connection_id,campaign_id,campaign_name,status,brand_id) VALUES (1,?,'A','A','ELIGIBLE',?)", (account["id"], first["id"]))
+            campaign_row_id = cursor.lastrowid
+            connection.execute("INSERT INTO naver_campaign_spend(workspace_id,naver_account_connection_id,campaign_id,brand_id,date,amount_krw,external_key) VALUES (1,?,'A',?,'2026-08-01',100,'one')", (account["id"], first["id"]))
+            connection.commit()
+        path = f"/api/sbrocor/finance/v1/naver-campaigns/{campaign_row_id}/mapping?workspace_id=1"
+        preview = self.request("POST", path, {"brand_id": second["id"]}).json
+        valid = self.request("POST", path, {"brand_id": second["id"], "apply": True, "from_brand_id": preview["from_brand_id"], "preview_token": preview["preview_token"]})
+        self.assertEqual(valid.status_code, 200, valid.get_data(as_text=True))
+
+        preview = self.request("POST", path, {"brand_id": first["id"]}).json
+        with closing(connect()) as connection:
+            connection.execute("INSERT INTO naver_campaign_spend(workspace_id,naver_account_connection_id,campaign_id,brand_id,date,amount_krw,external_key) VALUES (1,?,'A',?,'2026-08-02',200,'two')", (account["id"], second["id"]))
+            connection.commit()
+        stale = self.request("POST", path, {"brand_id": first["id"], "apply": True, "from_brand_id": preview["from_brand_id"], "preview_token": preview["preview_token"]})
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(stale.json["error"], "stale_preview")
+        with closing(connect()) as connection:
+            self.assertEqual(connection.execute("SELECT brand_id FROM naver_campaign WHERE id=?", (campaign_row_id,)).fetchone()[0], second["id"])
+
+        preview = self.request("POST", path, {"brand_id": first["id"]}).json
+        with closing(connect()) as connection:
+            connection.execute("UPDATE naver_campaign SET brand_id=?,updated_at='changed' WHERE id=?", (first["id"], campaign_row_id))
+            connection.commit()
+        stale = self.request("POST", path, {"brand_id": first["id"], "apply": True, "from_brand_id": preview["from_brand_id"], "preview_token": preview["preview_token"]})
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(stale.json["error"], "stale_preview")
 
     def test_naver_backend_rejects_multi_day_sync(self):
         self.create_workspace(1)

@@ -266,15 +266,48 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         connection.execute(
             "ALTER TABLE ad_spend ADD COLUMN brand_id INTEGER REFERENCES brand(id) ON DELETE RESTRICT"
         )
-    # v5: copy legacy Naver connection metadata only. Existing legacy rows and
-    # incorrectly attributed spend remain untouched until a separately approved cleanup.
-    connection.execute(
-        """INSERT OR IGNORE INTO naver_account_connection
-           (workspace_id,customer_id,account_name,credential_key,active,legacy_ad_account_connection_id,
-            last_spend_synced_at,created_at,updated_at)
-           SELECT workspace_id,account_id,account_name,credential_key,active,id,last_synced_at,created_at,updated_at
-           FROM ad_account_connection WHERE platform='naver'"""
+
+
+def _schema_statements(sql: str) -> list[str]:
+    return [statement.strip() for statement in sql.split(";") if statement.strip()]
+
+
+def _is_v5_statement(statement: str) -> bool:
+    normalized = " ".join(statement.lower().split())
+    return normalized.startswith("create table if not exists naver_") or normalized.startswith(
+        "create index if not exists ix_naver_"
     )
+
+
+def _v5_migration_hook(_stage: str) -> None:
+    """Fault-injection seam used by migration tests."""
+
+
+def _migrate_v5(connection: sqlite3.Connection) -> None:
+    current = int(connection.execute("SELECT COALESCE(MAX(version),0) FROM schema_version").fetchone()[0])
+    if current >= 5:
+        return
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        for statement in _schema_statements(SCHEMA_SQL):
+            if _is_v5_statement(statement):
+                connection.execute(statement)
+        _v5_migration_hook("after_ddl")
+        _v5_migration_hook("before_metadata")
+        # Copy connection metadata only. Legacy financial rows remain untouched.
+        connection.execute(
+            """INSERT OR IGNORE INTO naver_account_connection
+               (workspace_id,customer_id,account_name,credential_key,active,legacy_ad_account_connection_id,
+                last_spend_synced_at,created_at,updated_at)
+               SELECT workspace_id,account_id,account_name,credential_key,active,id,last_synced_at,created_at,updated_at
+               FROM ad_account_connection WHERE platform='naver'"""
+        )
+        _v5_migration_hook("before_version")
+        connection.execute("INSERT OR IGNORE INTO schema_version(version) VALUES (5)")
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
 
 
 def connect(path: Path | None = None) -> sqlite3.Connection:
@@ -294,10 +327,21 @@ def initialize_database(path: Path | None = None) -> Path:
     database_path.parent.mkdir(parents=True, exist_ok=True)
     with closing(connect(database_path)) as connection:
         connection.execute("PRAGMA journal_mode=WAL")
-        connection.executescript(SCHEMA_SQL)
+        existing = bool(connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").fetchone())
+        if existing:
+            base_schema = ";\n".join(
+                statement for statement in _schema_statements(SCHEMA_SQL) if not _is_v5_statement(statement)
+            ) + ";"
+            connection.executescript(base_schema)
+        else:
+            connection.executescript(SCHEMA_SQL)
         _apply_additive_migrations(connection)
-        connection.execute("INSERT OR IGNORE INTO schema_version(version) VALUES (?)", (SCHEMA_VERSION,))
         connection.commit()
+        if existing:
+            _migrate_v5(connection)
+        else:
+            connection.execute("INSERT OR IGNORE INTO schema_version(version) VALUES (?)", (SCHEMA_VERSION,))
+            connection.commit()
     return database_path
 
 
