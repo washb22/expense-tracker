@@ -9,6 +9,8 @@ import hmac
 import io
 import time
 from dataclasses import dataclass
+import re
+from urllib.parse import urlsplit
 
 import requests
 
@@ -65,10 +67,21 @@ class NaverSearchAdsClient:
             try:
                 payload = response.json()
                 code = payload.get("code") if isinstance(payload, dict) else None
+                message = payload.get("message") if isinstance(payload, dict) else None
             except (TypeError, ValueError):
                 code = None
-            raise NaverApiError(code=code)
+                message = None
+            safe_message = self._safe_message(message)
+            raise NaverApiError(f"Naver API: {safe_message}" if safe_message else "Naver Search Ads API 요청에 실패했습니다.", code=code)
         return response
+
+    def _safe_message(self, value: object) -> str:
+        message = str(value or "").strip()
+        for secret in (self.credentials.api_key, self.credentials.secret_key):
+            if secret:
+                message = message.replace(secret, "[REDACTED]")
+        message = re.sub(r"(?i)(X-(?:API-KEY|Signature)\s*[:=]\s*)\S+", r"\1[REDACTED]", message)
+        return message[:300]
 
     def daily_cost(self, day: str) -> int:
         """Build official AD report and sum its Cost column for the whole customer."""
@@ -89,8 +102,13 @@ class NaverSearchAdsClient:
             return 0
         if status != "BUILT" or not report.get("downloadUrl"):
             raise NaverApiError("Naver 보고서를 완료하지 못했습니다.")
+        download_url = str(report["downloadUrl"])
+        parts = urlsplit(download_url)
+        if parts.scheme != "https" or parts.hostname != "api.searchad.naver.com" or parts.path != "/report-download":
+            raise NaverApiError("Naver 보고서 다운로드 URL이 올바르지 않습니다.")
         try:
-            downloaded = self.session.get(report["downloadUrl"], headers=self._headers("GET", "/report-download"), timeout=120)
+            # Use the official URL verbatim so authtoken, fileVersion and future query fields survive.
+            downloaded = self.session.get(download_url, headers=self._headers("GET", "/report-download"), timeout=120)
         except requests.RequestException:
             raise NaverApiError("Naver 보고서를 다운로드하지 못했습니다.") from None
         if not 200 <= int(downloaded.status_code) < 300:

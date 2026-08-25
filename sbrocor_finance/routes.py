@@ -141,11 +141,25 @@ def _public_ad_account(item: dict, workspace_id: int, connection: sqlite3.Connec
     platform = str(item.get("platform") or "").lower()
     sync_supported = platform in {"meta", "naver"}
     configured = bool(_credential_token(item, workspace_id)) if platform == "meta" else bool(_naver_credentials(item))
+    latest = connection.execute(
+        "SELECT substr(date,1,10) spend_date,amount_krw FROM marketing_spend WHERE workspace_id=? AND ad_account_connection_id=? ORDER BY substr(date,1,10) DESC,id DESC LIMIT 1",
+        (workspace_id, item["id"]),
+    ).fetchone()
+    brand_name_row = connection.execute("SELECT name FROM brand WHERE id=? AND workspace_id=?", (item["brand_id"], workspace_id)).fetchone()
+    last_7d_amount = int(connection.execute(
+        "SELECT COALESCE(SUM(amount_krw),0) FROM marketing_spend WHERE workspace_id=? AND ad_account_connection_id=? "
+        "AND substr(date,1,10) >= COALESCE((SELECT date(MAX(substr(date,1,10)),'-6 days') FROM marketing_spend WHERE workspace_id=? AND ad_account_connection_id=?),'9999-12-31')",
+        (workspace_id, item["id"], workspace_id, item["id"]),
+    ).fetchone()[0])
     return {
         **item,
         "credential_configured": configured,
         "sync_supported": sync_supported,
         "identity_locked": identity_locked,
+        "latest_spend_date": latest["spend_date"] if latest else None,
+        "latest_spend_amount": int(latest["amount_krw"] or 0) if latest else None,
+        "last_7d_amount": last_7d_amount if latest else None,
+        "brand_name": brand_name_row["name"] if brand_name_row else None,
     }
 
 
@@ -803,6 +817,8 @@ def sync_ad_account(connection_id: int):
         ).fetchone()
         if not account: raise LookupError("ad account connection not found")
         if not account["active"]: raise ValueError("ad account connection is inactive")
+        if account["platform"] == "naver" and start_day != end_day:
+            raise ValueError("Naver sync는 현재 1일 단위로 실행해주세요.")
         if account["platform"] == "naver":
             credentials = _naver_credentials(account)
             if not credentials:

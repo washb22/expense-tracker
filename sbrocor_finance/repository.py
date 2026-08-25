@@ -476,6 +476,10 @@ class FinanceRepository:
             ).fetchone()[0])
             if product_id is not None:
                 actual_ad = direct_ad
+            manual_spend_rows = int(self.connection.execute(
+                "SELECT COUNT(*) FROM manual_marketing_spend m WHERE m.workspace_id=? AND substr(m.date,1,10)>=? AND substr(m.date,1,10)<=?" + manual_scope,
+                [workspace_id, start_date, end_date, *spend_params],
+            ).fetchone()[0])
             total_ad = int(self.connection.execute(
                 "SELECT COALESCE(SUM(amount),0) FROM finance_transaction WHERE workspace_id=? AND category='광고비' "
                 "AND substr(date,1,10)>=? AND substr(date,1,10)<=?", (workspace_id, start_date, end_date),
@@ -518,7 +522,10 @@ class FinanceRepository:
                     [workspace_id, start_date, end_date, product_id],
                 ).fetchone()[0])
             expected_sync_rows = days * analysis_accounts
-            coverage_complete = analysis_accounts >= 1 and synced_rows == expected_sync_rows
+            api_coverage_required = analysis_accounts > 0
+            api_coverage_complete = api_coverage_required and synced_rows == expected_sync_rows
+            manual_only_ready = not api_coverage_required and manual_spend_rows > 0
+            coverage_complete = api_coverage_complete or manual_only_ready
             currency_complete = not unconverted
             spend_analysis_ready = coverage_complete and currency_complete and (product_id is None or bool(direct_spend_rows))
             available_actual_ad = actual_ad if spend_analysis_ready else None
@@ -548,6 +555,8 @@ class FinanceRepository:
                     "days_expected": expected_sync_rows,
                     "days_synced": synced_rows,
                     "complete": coverage_complete,
+                    "api_coverage_required": api_coverage_required,
+                    "api_complete": api_coverage_complete,
                     "account_count": analysis_accounts,
                 },
                 "currency_complete": currency_complete,

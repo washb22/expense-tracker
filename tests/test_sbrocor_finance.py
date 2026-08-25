@@ -20,7 +20,7 @@ from sbrocor_finance.config import FinanceConfigurationError, get_finance_databa
 from sbrocor_finance.database import connect, initialize_database
 from sbrocor_finance.repository import FinanceRepository
 from sbrocor_finance.service import FinanceService
-from sbrocor_finance.naver_search_ads import generate_signature, parse_ad_report_cost
+from sbrocor_finance.naver_search_ads import Credentials, NaverApiError, NaverSearchAdsClient, generate_signature, parse_ad_report_cost
 
 
 SECRET_TEXT = "fixture-secret-that-is-at-least-thirty-two-bytes"
@@ -932,10 +932,12 @@ class FinanceApiTest(unittest.TestCase):
         self.assertEqual(a["actual_advertising_spend"], 300000)
         self.assertEqual(b["actual_advertising_spend"], 700000)
         self.assertEqual(workspace["paid_advertising_cost"], 123000)
-        self.assertEqual(workspace["spend_coverage"], {
-            "account_days_expected": 4, "account_days_synced": 4,
-            "days_expected": 4, "days_synced": 4, "complete": True, "account_count": 2,
-        })
+        self.assertEqual(workspace["spend_coverage"]["account_days_expected"], 4)
+        self.assertEqual(workspace["spend_coverage"]["account_days_synced"], 4)
+        self.assertTrue(workspace["spend_coverage"]["complete"])
+        self.assertTrue(workspace["spend_coverage"]["api_coverage_required"])
+        self.assertTrue(workspace["spend_coverage"]["api_complete"])
+        self.assertEqual(workspace["spend_coverage"]["account_count"], 2)
         self.assertTrue(workspace["spend_analysis_ready"])
         self.assertEqual(workspace["revenue_per_ad_won"], 0)
         self.assertEqual(workspace["quantity_per_10000_ad_spend"], 0)
@@ -1252,14 +1254,28 @@ class FinanceApiTest(unittest.TestCase):
             account = self.request("POST", "/api/sbrocor/finance/v1/ad-accounts?workspace_id=1", {"brand_id": brand["id"], "platform": "naver", "account_id": "123", "account_name": "N", "currency": "KRW", "credential_key": "MAIN"}).json
             self.assertTrue(account["credential_configured"])
             self.assertNotIn("api-secret", json.dumps(account))
-            with patch("sbrocor_finance.routes.NaverSearchAdsClient.daily_cost", side_effect=[50000, 0]):
-                response = self.request("POST", f"/api/sbrocor/finance/v1/ad-accounts/{account['id']}/sync?workspace_id=1", {"start_date": "2026-08-01", "end_date": "2026-08-02"})
-            self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
-            with patch("sbrocor_finance.routes.NaverSearchAdsClient.daily_cost", side_effect=[50000, 0]):
-                self.request("POST", f"/api/sbrocor/finance/v1/ad-accounts/{account['id']}/sync?workspace_id=1", {"start_date": "2026-08-01", "end_date": "2026-08-02"})
+            for day, amount in (("2026-08-01", 50000), ("2026-08-02", 0)):
+                with patch("sbrocor_finance.routes.NaverSearchAdsClient.daily_cost", return_value=amount):
+                    response = self.request("POST", f"/api/sbrocor/finance/v1/ad-accounts/{account['id']}/sync?workspace_id=1", {"start_date": day, "end_date": day})
+                self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+            for day, amount in (("2026-08-01", 50000), ("2026-08-02", 0)):
+                with patch("sbrocor_finance.routes.NaverSearchAdsClient.daily_cost", return_value=amount):
+                    self.request("POST", f"/api/sbrocor/finance/v1/ad-accounts/{account['id']}/sync?workspace_id=1", {"start_date": day, "end_date": day})
         with closing(connect()) as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM marketing_spend WHERE source='naver_api'").fetchone()[0], 2)
             self.assertEqual(connection.execute("SELECT SUM(amount_krw) FROM marketing_spend WHERE source='naver_api'").fetchone()[0], 50000)
+        listed = self.request("GET", "/api/sbrocor/finance/v1/ad-accounts?workspace_id=1&page_size=20").json["items"][0]
+        self.assertEqual(listed["latest_spend_date"], "2026-08-02")
+        self.assertEqual(listed["latest_spend_amount"], 0)
+        self.assertEqual(listed["last_7d_amount"], 50000)
+
+    def test_naver_backend_rejects_multi_day_sync(self):
+        self.create_workspace(1)
+        brand = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "N"}).json
+        account = self.request("POST", "/api/sbrocor/finance/v1/ad-accounts?workspace_id=1", {"brand_id": brand["id"], "platform": "naver", "account_id": "321", "account_name": "N", "currency": "KRW", "credential_key": "N"}).json
+        response = self.request("POST", f"/api/sbrocor/finance/v1/ad-accounts/{account['id']}/sync?workspace_id=1", {"start_date": "2026-08-01", "end_date": "2026-08-02"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json["detail"], "Naver sync는 현재 1일 단위로 실행해주세요.")
 
     def test_manual_spend_single_range_exact_update_delete_and_workspace_isolation(self):
         self.create_workspace(1); self.create_workspace(2)
@@ -1293,6 +1309,48 @@ class FinanceApiTest(unittest.TestCase):
         self.assertEqual(totals["actual_advertising_spend"], 180000)
         self.assertEqual(totals["spend_coverage"]["account_days_expected"], 2)
         self.assertEqual(totals["spend_coverage"]["account_days_synced"], 2)
+
+    def test_manual_only_analysis_and_missing_api_coverage_rules(self):
+        self.create_workspace(1)
+        brand = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "Manual"}).json
+        path = f"/api/sbrocor/finance/v1/sales-analysis/compare?workspace_id=1&brand_id={brand['id']}&a_start=2026-08-01&a_end=2026-08-01&b_start=2026-08-01&b_end=2026-08-01"
+        empty = self.request("GET", path).json["periods"]["a"]["totals"]
+        self.assertFalse(empty["spend_analysis_ready"])
+        self.request("POST", "/api/sbrocor/finance/v1/manual-marketing-spend?workspace_id=1", {"date": "2026-08-01", "brand_id": brand["id"], "channel": "바이럴", "amount_krw": 300000})
+        manual = self.request("GET", path).json["periods"]["a"]["totals"]
+        self.assertTrue(manual["spend_analysis_ready"])
+        self.assertEqual(manual["actual_advertising_spend"], 300000)
+        self.assertFalse(manual["spend_coverage"]["api_coverage_required"])
+        self.request("POST", "/api/sbrocor/finance/v1/ad-accounts?workspace_id=1", {"brand_id": brand["id"], "platform": "meta", "account_id": "act_missing", "account_name": "Missing", "currency": "KRW", "credential_key": "MISSING"})
+        missing = self.request("GET", path).json["periods"]["a"]["totals"]
+        self.assertFalse(missing["spend_analysis_ready"])
+        self.assertTrue(missing["spend_coverage"]["api_coverage_required"])
+
+    def test_naver_error_sanitization_and_download_url_validation(self):
+        api_key, secret = "fake-api-key-never-leak", "fake-secret-never-leak"
+        class Response:
+            def __init__(self, status=200, payload=None, content=b""): self.status_code=status; self._payload=payload; self.content=content
+            def json(self): return self._payload
+        class ErrorSession:
+            def request(self, *_args, **_kwargs): return Response(400, {"code": 12345, "message": f"bad {api_key} X-Signature={secret}"})
+        client = NaverSearchAdsClient(Credentials(api_key, secret, "111"), session=ErrorSession())
+        with self.assertRaises(NaverApiError) as caught:
+            client.daily_cost("2026-08-01")
+        text = str(caught.exception)
+        self.assertIn("Naver API:", text); self.assertNotIn(api_key, text); self.assertNotIn(secret, text)
+
+        class ReportSession:
+            def __init__(self, url): self.url=url; self.downloaded=None; self.calls=0
+            def request(self, *_args, **_kwargs):
+                self.calls += 1
+                return Response(payload={"reportJobId": 1, "status": "REGIST"} if self.calls == 1 else {"reportJobId": 1, "status": "BUILT", "downloadUrl": self.url})
+            def get(self, url, **_kwargs): self.downloaded=url; return Response(content=b"20260801\t1\ta\tb\tc\td\te\tf\tg\t1\t2\t500\n")
+        bad = ReportSession("https://evil.example/report-download?authtoken=x")
+        with self.assertRaises(NaverApiError): NaverSearchAdsClient(Credentials("a","b","1"), session=bad, poll_seconds=0).daily_cost("2026-08-01")
+        official = "https://api.searchad.naver.com/report-download?authtoken=token&fileVersion=v2"
+        good = ReportSession(official)
+        self.assertEqual(NaverSearchAdsClient(Credentials("a","b","1"), session=good, poll_seconds=0).daily_cost("2026-08-01"), 500)
+        self.assertEqual(good.downloaded, official)
 
 
 if __name__ == "__main__":
