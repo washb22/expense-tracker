@@ -5,6 +5,8 @@ from __future__ import annotations
 import sqlite3
 import uuid
 import math
+from decimal import Decimal
+from fractions import Fraction
 from datetime import date, timedelta
 from typing import Any, Iterable
 
@@ -362,6 +364,83 @@ class FinanceRepository:
             "products": products,
         }
 
+    def _meta_product_attribution(
+        self, workspace_id: int, start_date: str, end_date: str, brand_id: int | None = None
+    ) -> dict[str, Any]:
+        """Allocate each Meta account/day total exactly across its raw ads.
+
+        ``marketing_spend`` remains the only source of the account total. Raw
+        ``ad_spend`` rows provide weights only, so this cannot double-count the
+        total Meta spend.
+        """
+        scope = " AND ms.brand_id=?" if brand_id is not None else ""
+        totals = self.connection.execute(
+            "SELECT ms.ad_account_connection_id,ms.brand_id,substr(ms.date,1,10) date,ms.amount_krw "
+            "FROM marketing_spend ms JOIN ad_account_connection ac ON ac.id=ms.ad_account_connection_id "
+            "AND ac.workspace_id=ms.workspace_id WHERE ms.workspace_id=? AND ac.platform='meta' "
+            "AND ms.source='meta_api' AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=?" + scope,
+            [workspace_id, start_date, end_date, *( [brand_id] if brand_id is not None else [] )],
+        ).fetchall()
+        allocations = {
+            (int(row["ad_account_connection_id"]), str(row["ad_id"])): dict(row)
+            for row in self.connection.execute(
+                "SELECT ad_account_connection_id,ad_id,allocation_mode,product_id FROM meta_ad_allocation "
+                "WHERE workspace_id=?", (workspace_id,),
+            )
+        }
+        direct_by_product: dict[int, int] = {}
+        unassigned_by_brand: dict[int, int] = {}
+        brand_common = unassigned = unavailable = 0
+        for total in totals:
+            amount_value = total["amount_krw"]
+            if amount_value is None:
+                continue
+            amount = int(amount_value)
+            connection_id = int(total["ad_account_connection_id"])
+            current_brand = int(total["brand_id"])
+            raw_rows = self.connection.execute(
+                "SELECT ad_id,SUM(spend) raw_spend FROM ad_spend WHERE workspace_id=? "
+                "AND ad_account_connection_id=? AND platform='meta' AND substr(date,1,10)=? "
+                "AND ad_id IS NOT NULL GROUP BY ad_id HAVING SUM(spend)>0 ORDER BY ad_id",
+                (workspace_id, connection_id, total["date"]),
+            ).fetchall()
+            weights = [(str(row["ad_id"]), Fraction(Decimal(str(row["raw_spend"])))) for row in raw_rows]
+            weight_total = sum((weight for _, weight in weights), Fraction(0))
+            if not weights or weight_total <= 0:
+                unavailable += amount
+                unassigned += amount
+                unassigned_by_brand[current_brand] = unassigned_by_brand.get(current_brand, 0) + amount
+                continue
+            floors: list[list[Any]] = []
+            assigned = 0
+            for ad_id, weight in weights:
+                exact = Fraction(amount) * weight / weight_total
+                base = exact.numerator // exact.denominator
+                floors.append([ad_id, base, exact - base])
+                assigned += base
+            for entry in sorted(floors, key=lambda value: (-value[2], value[0]))[: amount - assigned]:
+                entry[1] += 1
+            for ad_id, allocated, _remainder in floors:
+                mapping = allocations.get((connection_id, ad_id), {"allocation_mode": "unassigned", "product_id": None})
+                mode = mapping["allocation_mode"]
+                if mode == "product" and mapping["product_id"] is not None:
+                    product_key = int(mapping["product_id"])
+                    direct_by_product[product_key] = direct_by_product.get(product_key, 0) + int(allocated)
+                elif mode == "brand_common":
+                    brand_common += int(allocated)
+                else:
+                    unassigned += int(allocated)
+                    unassigned_by_brand[current_brand] = unassigned_by_brand.get(current_brand, 0) + int(allocated)
+        return {
+            "direct_by_product": direct_by_product,
+            "direct_product_amount": sum(direct_by_product.values()),
+            "brand_common_amount": brand_common,
+            "unassigned_amount": unassigned,
+            "unassigned_by_brand": unassigned_by_brand,
+            "unavailable_amount": unavailable,
+            "complete": unassigned == 0,
+        }
+
     def sales_analysis_compare(
         self, workspace_id: int, periods: dict[str, tuple[str, str]],
         brand_id: int | None = None, product_id: int | None = None,
@@ -454,10 +533,15 @@ class FinanceRepository:
                 "AND substr(m.date,1,10)>=? AND substr(m.date,1,10)<=?" + manual_scope,
                 [workspace_id, start_date, end_date, *spend_params],
             ).fetchone()[0])
-            direct_ad = int(self.connection.execute(
-                "SELECT COALESCE(SUM(ms.amount_krw),0) FROM marketing_spend ms "
-                "JOIN ad_account_connection ac ON ac.id=ms.ad_account_connection_id AND ac.workspace_id=ms.workspace_id "
-                "WHERE ms.workspace_id=? AND ms.source!='naver_api' AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=? AND ms.product_id IS NOT NULL" +
+            meta_product_attribution = self._meta_product_attribution(workspace_id, start_date, end_date, brand_id)
+            if product_id is not None:
+                direct_ad = int(meta_product_attribution["direct_by_product"].get(product_id, 0))
+            else:
+                direct_ad = int(meta_product_attribution["direct_product_amount"])
+            direct_ad += int(self.connection.execute(
+                "SELECT COALESCE(SUM(ms.amount_krw),0) FROM marketing_spend ms WHERE ms.workspace_id=? "
+                "AND ms.source NOT IN ('meta_api','naver_api') AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=? "
+                "AND ms.product_id IS NOT NULL" +
                 (" AND ms.product_id=?" if product_id is not None else " AND ms.brand_id=?" if brand_id is not None else ""),
                 [workspace_id, start_date, end_date, *( [product_id] if product_id is not None else [brand_id] if brand_id is not None else [] )],
             ).fetchone()[0])
@@ -473,11 +557,11 @@ class FinanceRepository:
                 (" AND ns.product_id=?" if product_id is not None else " AND ns.brand_id=?" if brand_id is not None else ""),
                 [workspace_id, start_date, end_date, *( [product_id] if product_id is not None else [brand_id] if brand_id is not None else [] )],
             ).fetchone()[0])
-            brand_common_ad = int(self.connection.execute(
-                "SELECT COALESCE(SUM(ms.amount_krw),0) FROM marketing_spend ms "
-                "JOIN ad_account_connection ac ON ac.id=ms.ad_account_connection_id AND ac.workspace_id=ms.workspace_id "
-                "WHERE ms.workspace_id=? AND ms.source!='naver_api' AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=? AND ms.product_id IS NULL" +
-                (" AND ms.brand_id=?" if brand_id is not None else ""),
+            brand_common_ad = int(meta_product_attribution["brand_common_amount"])
+            brand_common_ad += int(self.connection.execute(
+                "SELECT COALESCE(SUM(ms.amount_krw),0) FROM marketing_spend ms WHERE ms.workspace_id=? "
+                "AND ms.source NOT IN ('meta_api','naver_api') AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=? "
+                "AND ms.product_id IS NULL" + (" AND ms.brand_id=?" if brand_id is not None else ""),
                 [workspace_id, start_date, end_date, *( [brand_id] if brand_id is not None else [] )],
             ).fetchone()[0])
             brand_common_ad += int(self.connection.execute(
@@ -580,7 +664,14 @@ class FinanceRepository:
             manual_only_ready = not api_coverage_required and manual_spend_rows > 0
             coverage_complete = api_coverage_complete or manual_only_ready
             currency_complete = not unconverted
-            spend_analysis_ready = coverage_complete and currency_complete and (product_id is None or bool(direct_spend_rows))
+            product_attribution_ready = product_id is None or (
+                int(meta_product_attribution["unassigned_amount"] or 0) == 0
+                and int(naver_product_attribution["unassigned_amount"] or 0) == 0
+            )
+            product_has_direct_spend = product_id is None or bool(
+                direct_spend_rows or meta_product_attribution["direct_by_product"].get(product_id, 0)
+            )
+            spend_analysis_ready = coverage_complete and currency_complete and product_attribution_ready and product_has_direct_spend
             available_actual_ad = actual_ad if spend_analysis_ready else None
             available_direct_ad = direct_ad if spend_analysis_ready else None
             available_brand_common_ad = brand_common_ad if spend_analysis_ready else None
@@ -625,6 +716,13 @@ class FinanceRepository:
                     "brand_common_amount": int(naver_product_attribution["brand_common_amount"] or 0),
                     "direct_product_amount": int(naver_product_attribution["direct_product_amount"] or 0),
                 },
+                "meta_product_attribution": {
+                    "complete": bool(meta_product_attribution["complete"]),
+                    "unassigned_amount": int(meta_product_attribution["unassigned_amount"]),
+                    "brand_common_amount": int(meta_product_attribution["brand_common_amount"]),
+                    "direct_product_amount": int(meta_product_attribution["direct_product_amount"]),
+                    "unavailable_amount": int(meta_product_attribution["unavailable_amount"]),
+                },
                 "currency_complete": currency_complete,
                 "unconverted_currencies": unconverted,
             })
@@ -635,22 +733,36 @@ class FinanceRepository:
                 "WHERE s.workspace_id=? AND substr(s.date,1,10)>=? AND substr(s.date,1,10)<=?" + product_scope + " GROUP BY s.product_id",
                 sale_params,
             )}
-            grouped_ads = {int(row["product_id"]): dict(row) for row in self.connection.execute(
+            grouped_ads = {
+                int(meta_product_id): {
+                    "product_id": int(meta_product_id), "amount": int(amount), "spend_rows": 1,
+                    "meta_amount": int(amount), "naver_amount": 0, "other_amount": 0,
+                }
+                for meta_product_id, amount in meta_product_attribution["direct_by_product"].items()
+                if product_id is None or int(meta_product_id) == product_id
+            }
+            for row in self.connection.execute(
                 "SELECT ms.product_id,SUM(ms.amount_krw) amount,COUNT(*) spend_rows FROM marketing_spend ms "
-                "JOIN ad_account_connection ac ON ac.id=ms.ad_account_connection_id AND ac.workspace_id=ms.workspace_id "
-                "WHERE ms.workspace_id=? AND ms.source!='naver_api' AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=? AND ms.product_id IS NOT NULL" +
-                (" AND ms.product_id=?" if product_id is not None else " AND ms.brand_id=?" if brand_id is not None else "") + " GROUP BY ms.product_id",
+                "WHERE ms.workspace_id=? AND ms.source NOT IN ('meta_api','naver_api') AND substr(ms.date,1,10)>=? "
+                "AND substr(ms.date,1,10)<=? AND ms.product_id IS NOT NULL" +
+                (" AND ms.product_id=?" if product_id is not None else " AND ms.brand_id=?" if brand_id is not None else "") +
+                " GROUP BY ms.product_id",
                 [workspace_id, start_date, end_date, *( [product_id] if product_id is not None else [brand_id] if brand_id is not None else [] )],
-            )}
+            ):
+                current = grouped_ads.setdefault(int(row["product_id"]), {"product_id": row["product_id"], "amount": 0, "spend_rows": 0, "meta_amount": 0, "naver_amount": 0, "other_amount": 0})
+                current["amount"] = int(current["amount"] or 0) + int(row["amount"] or 0)
+                current["spend_rows"] = int(current["spend_rows"] or 0) + int(row["spend_rows"] or 0)
+                current["other_amount"] = int(current.get("other_amount", 0)) + int(row["amount"] or 0)
             for row in self.connection.execute(
                 "SELECT m.product_id,SUM(m.amount_krw) amount,COUNT(*) spend_rows FROM manual_marketing_spend m "
                 "WHERE m.workspace_id=? AND substr(m.date,1,10)>=? AND substr(m.date,1,10)<=? AND m.product_id IS NOT NULL" +
                 (" AND m.product_id=?" if product_id is not None else " AND m.brand_id=?" if brand_id is not None else "") + " GROUP BY m.product_id",
                 [workspace_id, start_date, end_date, *( [product_id] if product_id is not None else [brand_id] if brand_id is not None else [] )],
             ):
-                current = grouped_ads.setdefault(int(row["product_id"]), {"product_id": row["product_id"], "amount": 0, "spend_rows": 0})
+                current = grouped_ads.setdefault(int(row["product_id"]), {"product_id": row["product_id"], "amount": 0, "spend_rows": 0, "meta_amount": 0, "naver_amount": 0, "other_amount": 0})
                 current["amount"] = int(current["amount"] or 0) + int(row["amount"] or 0)
                 current["spend_rows"] = int(current["spend_rows"] or 0) + int(row["spend_rows"] or 0)
+                current["other_amount"] = int(current.get("other_amount", 0)) + int(row["amount"] or 0)
             for row in self.connection.execute(
                 "SELECT ns.product_id,SUM(ns.amount_krw) amount,COUNT(*) spend_rows FROM naver_adgroup_spend ns "
                 "WHERE ns.workspace_id=? AND ns.date>=? AND ns.date<=? AND ns.allocation_mode='product' AND ns.product_id IS NOT NULL" +
@@ -658,23 +770,40 @@ class FinanceRepository:
                 " GROUP BY ns.product_id",
                 [workspace_id, start_date, end_date, *( [product_id] if product_id is not None else [brand_id] if brand_id is not None else [] )],
             ):
-                current = grouped_ads.setdefault(int(row["product_id"]), {"product_id": row["product_id"], "amount": 0, "spend_rows": 0, "naver_amount": 0})
+                current = grouped_ads.setdefault(int(row["product_id"]), {"product_id": row["product_id"], "amount": 0, "spend_rows": 0, "meta_amount": 0, "naver_amount": 0, "other_amount": 0})
                 current["amount"] = int(current["amount"] or 0) + int(row["amount"] or 0)
                 current["spend_rows"] = int(current["spend_rows"] or 0) + int(row["spend_rows"] or 0)
                 current["naver_amount"] = int(row["amount"] or 0)
+            naver_unassigned_by_brand = {
+                int(row["brand_id"]): int(row["amount"] or 0)
+                for row in self.connection.execute(
+                    "SELECT brand_id,SUM(amount_krw) amount FROM naver_adgroup_spend WHERE workspace_id=? "
+                    "AND date>=? AND date<=? AND allocation_mode='unassigned' AND brand_id IS NOT NULL GROUP BY brand_id",
+                    (workspace_id, start_date, end_date),
+                )
+            }
             for item_id, item in products_by_id.items():
                 values = grouped_sales.get(item_id, {"revenue": 0, "quantity": 0, "sales_profit": 0})
                 spend = grouped_ads.get(item_id)
                 direct = int(spend["amount"] or 0) if spend else 0
-                direct_available = spend_analysis_ready and bool(spend and spend["spend_rows"])
+                item_brand_id = int(item["brand_id"]) if item["brand_id"] is not None else None
+                meta_unassigned = int(meta_product_attribution["unassigned_by_brand"].get(item_brand_id, 0)) if item_brand_id is not None else 0
+                naver_unassigned = int(naver_unassigned_by_brand.get(item_brand_id, 0)) if item_brand_id is not None else 0
+                attribution_complete = item_brand_id is not None and meta_unassigned == 0 and naver_unassigned == 0
+                direct_available = spend_analysis_ready and attribution_complete and bool(spend and spend["spend_rows"])
                 item["periods"][key] = {
                     **values,
                     "direct_advertising_cost": direct if direct_available else None,
                     "direct_advertising_available": direct_available,
+                    "direct_meta_advertising_spend": int(spend.get("meta_amount", 0)) if spend else 0,
                     "direct_naver_advertising_spend": int(spend.get("naver_amount", 0)) if spend else 0,
+                    "direct_other_advertising_spend": int(spend.get("other_amount", 0)) if spend else 0,
                     "profit_after_direct_advertising": int(values["sales_profit"]) - direct if direct_available else None,
                     "profit_after_advertising": int(values["sales_profit"]) - direct if direct_available else None,
-                    "attribution_complete": int(naver_product_attribution["unassigned_amount"] or 0) == 0 and int(naver_product_attribution["brand_common_amount"] or 0) == 0,
+                    "attribution_complete": attribution_complete,
+                    "brand_unassigned": item_brand_id is None,
+                    "meta_unassigned_amount": meta_unassigned,
+                    "naver_unassigned_amount": naver_unassigned,
                 }
 
             daily_sales = {row["date"]: dict(row) for row in self.connection.execute(

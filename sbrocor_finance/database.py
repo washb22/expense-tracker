@@ -11,7 +11,7 @@ from typing import Iterator
 from .config import get_finance_database_path
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -138,6 +138,20 @@ CREATE TABLE IF NOT EXISTS marketing_spend (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(workspace_id, source, external_key)
+);
+CREATE TABLE IF NOT EXISTS meta_ad_allocation (
+    id INTEGER PRIMARY KEY,
+    workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE RESTRICT,
+    ad_account_connection_id INTEGER NOT NULL REFERENCES ad_account_connection(id) ON DELETE RESTRICT,
+    ad_id TEXT NOT NULL,
+    allocation_mode TEXT NOT NULL DEFAULT 'unassigned'
+        CHECK(allocation_mode IN ('unassigned','brand_common','product')),
+    product_id INTEGER REFERENCES product(id) ON DELETE RESTRICT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(workspace_id, ad_account_connection_id, ad_id),
+    CHECK((allocation_mode='product' AND product_id IS NOT NULL) OR
+          (allocation_mode!='product' AND product_id IS NULL))
 );
 CREATE TABLE IF NOT EXISTS manual_marketing_spend (
     id TEXT PRIMARY KEY,
@@ -275,6 +289,8 @@ CREATE INDEX IF NOT EXISTS ix_ad_spend_workspace_date ON ad_spend(workspace_id, 
 CREATE INDEX IF NOT EXISTS ix_ad_account_workspace_brand ON ad_account_connection(workspace_id, brand_id, active);
 CREATE INDEX IF NOT EXISTS ix_marketing_spend_workspace_date ON marketing_spend(workspace_id, date);
 CREATE INDEX IF NOT EXISTS ix_marketing_spend_brand_date ON marketing_spend(workspace_id, brand_id, date);
+CREATE INDEX IF NOT EXISTS ix_meta_ad_allocation_connection ON meta_ad_allocation(workspace_id, ad_account_connection_id);
+CREATE INDEX IF NOT EXISTS ix_meta_ad_allocation_product ON meta_ad_allocation(workspace_id, product_id);
 CREATE INDEX IF NOT EXISTS ix_manual_spend_workspace_date ON manual_marketing_spend(workspace_id, date);
 CREATE INDEX IF NOT EXISTS ix_manual_spend_workspace_batch ON manual_marketing_spend(workspace_id, batch_id);
 CREATE INDEX IF NOT EXISTS ix_manual_spend_brand_product_date ON manual_marketing_spend(workspace_id, brand_id, product_id, date);
@@ -429,6 +445,35 @@ def _migrate_v7(connection: sqlite3.Connection) -> None:
         raise
 
 
+def _v8_migration_hook(_stage: str) -> None:
+    """Fault-injection seam used by migration tests."""
+
+
+def _is_v8_statement(statement: str) -> bool:
+    normalized = " ".join(statement.lower().split())
+    return normalized.startswith("create table if not exists meta_ad_allocation") or normalized.startswith(
+        "create index if not exists ix_meta_ad_allocation"
+    )
+
+
+def _migrate_v8(connection: sqlite3.Connection) -> None:
+    current = int(connection.execute("SELECT COALESCE(MAX(version),0) FROM schema_version").fetchone()[0])
+    if current >= 8:
+        return
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        for statement in _schema_statements(SCHEMA_SQL):
+            if _is_v8_statement(statement):
+                connection.execute(statement)
+        _v8_migration_hook("after_ddl")
+        _v8_migration_hook("before_version")
+        connection.execute("INSERT OR IGNORE INTO schema_version(version) VALUES (8)")
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+
+
 def connect(path: Path | None = None) -> sqlite3.Connection:
     database_path = (path or get_finance_database_path()).resolve()
     # Re-run the central guard even when a caller passes a path explicitly.
@@ -450,7 +495,7 @@ def initialize_database(path: Path | None = None) -> Path:
         if existing:
             base_schema = ";\n".join(
                 statement for statement in _schema_statements(SCHEMA_SQL)
-                if not _is_v5_statement(statement) and not _is_v6_statement(statement)
+                if not _is_v5_statement(statement) and not _is_v6_statement(statement) and not _is_v8_statement(statement)
             ) + ";"
             connection.executescript(base_schema)
         else:
@@ -461,6 +506,7 @@ def initialize_database(path: Path | None = None) -> Path:
             _migrate_v5(connection)
             _migrate_v6(connection)
             _migrate_v7(connection)
+            _migrate_v8(connection)
         else:
             connection.execute("INSERT OR IGNORE INTO schema_version(version) VALUES (?)", (SCHEMA_VERSION,))
             connection.commit()
