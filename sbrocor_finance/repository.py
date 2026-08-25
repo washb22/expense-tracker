@@ -404,6 +404,7 @@ class FinanceRepository:
             spend_scope = " AND ms.product_id=?"; spend_params.append(product_id)
         elif brand_id is not None:
             spend_scope = " AND ms.brand_id=?"; spend_params.append(brand_id)
+        manual_scope = spend_scope.replace("ms.", "m.")
 
         paid_scope = ""
         paid_params: list[Any] = []
@@ -442,11 +443,22 @@ class FinanceRepository:
                 "WHERE ms.workspace_id=? AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=?" + spend_scope,
                 [workspace_id, start_date, end_date, *spend_params],
             ).fetchone()[0])
+            actual_ad += int(self.connection.execute(
+                "SELECT COALESCE(SUM(m.amount_krw),0) FROM manual_marketing_spend m WHERE m.workspace_id=? "
+                "AND substr(m.date,1,10)>=? AND substr(m.date,1,10)<=?" + manual_scope,
+                [workspace_id, start_date, end_date, *spend_params],
+            ).fetchone()[0])
             direct_ad = int(self.connection.execute(
                 "SELECT COALESCE(SUM(ms.amount_krw),0) FROM marketing_spend ms "
                 "JOIN ad_account_connection ac ON ac.id=ms.ad_account_connection_id AND ac.workspace_id=ms.workspace_id "
                 "WHERE ms.workspace_id=? AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=? AND ms.product_id IS NOT NULL" +
                 (" AND ms.product_id=?" if product_id is not None else " AND ms.brand_id=?" if brand_id is not None else ""),
+                [workspace_id, start_date, end_date, *( [product_id] if product_id is not None else [brand_id] if brand_id is not None else [] )],
+            ).fetchone()[0])
+            direct_ad += int(self.connection.execute(
+                "SELECT COALESCE(SUM(m.amount_krw),0) FROM manual_marketing_spend m WHERE m.workspace_id=? "
+                "AND substr(m.date,1,10)>=? AND substr(m.date,1,10)<=? AND m.product_id IS NOT NULL" +
+                (" AND m.product_id=?" if product_id is not None else " AND m.brand_id=?" if brand_id is not None else ""),
                 [workspace_id, start_date, end_date, *( [product_id] if product_id is not None else [brand_id] if brand_id is not None else [] )],
             ).fetchone()[0])
             brand_common_ad = int(self.connection.execute(
@@ -456,8 +468,18 @@ class FinanceRepository:
                 (" AND ms.brand_id=?" if brand_id is not None else ""),
                 [workspace_id, start_date, end_date, *( [brand_id] if brand_id is not None else [] )],
             ).fetchone()[0])
+            brand_common_ad += int(self.connection.execute(
+                "SELECT COALESCE(SUM(m.amount_krw),0) FROM manual_marketing_spend m WHERE m.workspace_id=? "
+                "AND substr(m.date,1,10)>=? AND substr(m.date,1,10)<=? AND m.product_id IS NULL" +
+                (" AND m.brand_id=?" if brand_id is not None else ""),
+                [workspace_id, start_date, end_date, *( [brand_id] if brand_id is not None else [] )],
+            ).fetchone()[0])
             if product_id is not None:
                 actual_ad = direct_ad
+            manual_spend_rows = int(self.connection.execute(
+                "SELECT COUNT(*) FROM manual_marketing_spend m WHERE m.workspace_id=? AND substr(m.date,1,10)>=? AND substr(m.date,1,10)<=?" + manual_scope,
+                [workspace_id, start_date, end_date, *spend_params],
+            ).fetchone()[0])
             total_ad = int(self.connection.execute(
                 "SELECT COALESCE(SUM(amount),0) FROM finance_transaction WHERE workspace_id=? AND category='광고비' "
                 "AND substr(date,1,10)>=? AND substr(date,1,10)<=?", (workspace_id, start_date, end_date),
@@ -494,8 +516,16 @@ class FinanceRepository:
                 "WHERE ms.workspace_id=? AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=? AND ms.product_id=?",
                 [workspace_id, start_date, end_date, product_id],
             ).fetchone()[0]) if product_id is not None else None
+            if product_id is not None:
+                direct_spend_rows += int(self.connection.execute(
+                    "SELECT COUNT(*) FROM manual_marketing_spend WHERE workspace_id=? AND substr(date,1,10)>=? AND substr(date,1,10)<=? AND product_id=?",
+                    [workspace_id, start_date, end_date, product_id],
+                ).fetchone()[0])
             expected_sync_rows = days * analysis_accounts
-            coverage_complete = analysis_accounts >= 1 and synced_rows == expected_sync_rows
+            api_coverage_required = analysis_accounts > 0
+            api_coverage_complete = api_coverage_required and synced_rows == expected_sync_rows
+            manual_only_ready = not api_coverage_required and manual_spend_rows > 0
+            coverage_complete = api_coverage_complete or manual_only_ready
             currency_complete = not unconverted
             spend_analysis_ready = coverage_complete and currency_complete and (product_id is None or bool(direct_spend_rows))
             available_actual_ad = actual_ad if spend_analysis_ready else None
@@ -525,6 +555,8 @@ class FinanceRepository:
                     "days_expected": expected_sync_rows,
                     "days_synced": synced_rows,
                     "complete": coverage_complete,
+                    "api_coverage_required": api_coverage_required,
+                    "api_complete": api_coverage_complete,
                     "account_count": analysis_accounts,
                 },
                 "currency_complete": currency_complete,
@@ -544,6 +576,15 @@ class FinanceRepository:
                 (" AND ms.product_id=?" if product_id is not None else " AND ms.brand_id=?" if brand_id is not None else "") + " GROUP BY ms.product_id",
                 [workspace_id, start_date, end_date, *( [product_id] if product_id is not None else [brand_id] if brand_id is not None else [] )],
             )}
+            for row in self.connection.execute(
+                "SELECT m.product_id,SUM(m.amount_krw) amount,COUNT(*) spend_rows FROM manual_marketing_spend m "
+                "WHERE m.workspace_id=? AND substr(m.date,1,10)>=? AND substr(m.date,1,10)<=? AND m.product_id IS NOT NULL" +
+                (" AND m.product_id=?" if product_id is not None else " AND m.brand_id=?" if brand_id is not None else "") + " GROUP BY m.product_id",
+                [workspace_id, start_date, end_date, *( [product_id] if product_id is not None else [brand_id] if brand_id is not None else [] )],
+            ):
+                current = grouped_ads.setdefault(int(row["product_id"]), {"product_id": row["product_id"], "amount": 0, "spend_rows": 0})
+                current["amount"] = int(current["amount"] or 0) + int(row["amount"] or 0)
+                current["spend_rows"] = int(current["spend_rows"] or 0) + int(row["spend_rows"] or 0)
             for item_id, item in products_by_id.items():
                 values = grouped_sales.get(item_id, {"revenue": 0, "quantity": 0, "sales_profit": 0})
                 spend = grouped_ads.get(item_id)
@@ -567,6 +608,12 @@ class FinanceRepository:
                 "WHERE ms.workspace_id=? AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=?" + spend_scope + " GROUP BY substr(ms.date,1,10)",
                 [workspace_id, start_date, end_date, *spend_params],
             )}
+            for row in self.connection.execute(
+                "SELECT substr(m.date,1,10) date,SUM(m.amount_krw) amount FROM manual_marketing_spend m WHERE m.workspace_id=? "
+                "AND substr(m.date,1,10)>=? AND substr(m.date,1,10)<=?" + manual_scope + " GROUP BY substr(m.date,1,10)",
+                [workspace_id, start_date, end_date, *spend_params],
+            ):
+                daily_ads[row["date"]] = daily_ads.get(row["date"], 0) + int(row["amount"] or 0)
             daily = []
             cursor = date.fromisoformat(start_date); final = date.fromisoformat(end_date)
             while cursor <= final:
@@ -579,6 +626,14 @@ class FinanceRepository:
                 "WHERE ms.workspace_id=? AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=?" + spend_scope + " GROUP BY ms.channel ORDER BY amount DESC",
                 [workspace_id, start_date, end_date, *spend_params],
             )]
+            channel_map = {row["name"]: int(row["amount"] or 0) for row in channels}
+            for row in self.connection.execute(
+                "SELECT m.channel name,SUM(m.amount_krw) amount FROM manual_marketing_spend m WHERE m.workspace_id=? "
+                "AND substr(m.date,1,10)>=? AND substr(m.date,1,10)<=?" + manual_scope + " GROUP BY m.channel",
+                [workspace_id, start_date, end_date, *spend_params],
+            ):
+                channel_map[row["name"]] = channel_map.get(row["name"], 0) + int(row["amount"] or 0)
+            channels = [{"name": name, "amount": amount} for name, amount in sorted(channel_map.items(), key=lambda item: item[1], reverse=True)]
             if not spend_analysis_ready:
                 channels = []
             result_periods[key] = {"start_date": start_date, "end_date": end_date, "totals": total_row, "daily": daily, "channels": channels}
@@ -821,4 +876,5 @@ class FinanceRepository:
         daily = grouped("date"); campaigns = grouped("campaign_id,campaign_name"); adsets = grouped("campaign_id,adset_id,adset_name"); creatives = grouped("campaign_id,adset_id,ad_id,ad_name")
         alerts = [{"level": "campaign", "id": row["campaign_id"], "name": row["campaign_name"], "spend": row["spend"], "reason": "전환 0건 · 중단 검토"} for row in campaigns if row["conversions"] == 0 and row["spend"] > 50000]
         return {"summary": summary, "daily": daily, "campaigns": campaigns, "adsets": adsets, "creatives": creatives, "alerts": alerts, "available_months": self.available_months(workspace_id, "ads")}
+
 

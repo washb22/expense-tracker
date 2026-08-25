@@ -19,6 +19,7 @@ from .auth import require_server_hmac
 from .database import finance_connection
 from .repository import FinanceRepository, MARKETING_CHANNELS, RESOURCE_CONFIG
 from .service import FinanceService
+from .naver_search_ads import Credentials, NaverApiError, NaverSearchAdsClient
 
 
 finance_blueprint = Blueprint("sbrocor_finance", __name__, url_prefix="/api/sbrocor/finance/v1")
@@ -122,18 +123,43 @@ def _credential_token(account: sqlite3.Row | dict, workspace_id: int) -> str | N
     return os.getenv(f"SBROCOR_META_ACCESS_TOKEN_{key}") or os.getenv(f"SBROCOR_META_ACCESS_TOKEN_WORKSPACE_{workspace_id}")
 
 
+def _naver_credentials(account: sqlite3.Row | dict) -> Credentials | None:
+    if str(account["platform"] or "").lower() != "naver":
+        return None
+    key = str(account["credential_key"] or "").strip().upper()
+    api_key = os.getenv(f"SBROCOR_NAVER_API_KEY_{key}")
+    secret_key = os.getenv(f"SBROCOR_NAVER_SECRET_KEY_{key}")
+    return Credentials(api_key, secret_key, str(account["account_id"])) if api_key and secret_key else None
+
+
 def _public_ad_account(item: dict, workspace_id: int, connection: sqlite3.Connection) -> dict:
     identity_locked = bool(connection.execute(
         "SELECT EXISTS(SELECT 1 FROM marketing_spend WHERE workspace_id=? AND ad_account_connection_id=?) "
         "OR EXISTS(SELECT 1 FROM ad_spend WHERE workspace_id=? AND ad_account_connection_id=?)",
         (workspace_id, item["id"], workspace_id, item["id"]),
     ).fetchone()[0])
-    sync_supported = str(item.get("platform") or "").lower() == "meta"
+    platform = str(item.get("platform") or "").lower()
+    sync_supported = platform in {"meta", "naver"}
+    configured = bool(_credential_token(item, workspace_id)) if platform == "meta" else bool(_naver_credentials(item))
+    latest = connection.execute(
+        "SELECT substr(date,1,10) spend_date,amount_krw FROM marketing_spend WHERE workspace_id=? AND ad_account_connection_id=? ORDER BY substr(date,1,10) DESC,id DESC LIMIT 1",
+        (workspace_id, item["id"]),
+    ).fetchone()
+    brand_name_row = connection.execute("SELECT name FROM brand WHERE id=? AND workspace_id=?", (item["brand_id"], workspace_id)).fetchone()
+    last_7d_amount = int(connection.execute(
+        "SELECT COALESCE(SUM(amount_krw),0) FROM marketing_spend WHERE workspace_id=? AND ad_account_connection_id=? "
+        "AND substr(date,1,10) >= COALESCE((SELECT date(MAX(substr(date,1,10)),'-6 days') FROM marketing_spend WHERE workspace_id=? AND ad_account_connection_id=?),'9999-12-31')",
+        (workspace_id, item["id"], workspace_id, item["id"]),
+    ).fetchone()[0])
     return {
         **item,
-        "credential_configured": sync_supported and bool(_credential_token(item, workspace_id)),
+        "credential_configured": configured,
         "sync_supported": sync_supported,
         "identity_locked": identity_locked,
+        "latest_spend_date": latest["spend_date"] if latest else None,
+        "latest_spend_amount": int(latest["amount_krw"] or 0) if latest else None,
+        "last_7d_amount": last_7d_amount if latest else None,
+        "brand_name": brand_name_row["name"] if brand_name_row else None,
     }
 
 
@@ -221,6 +247,14 @@ def _meta_api_error(error):
         payload["meta_code"] = error.meta_code
     if error.meta_subcode is not None:
         payload["meta_subcode"] = error.meta_subcode
+    return jsonify(payload), 502
+
+
+@finance_blueprint.errorhandler(NaverApiError)
+def _naver_api_error(error):
+    payload = {"error": "naver_api_error", "detail": error.detail}
+    if error.code is not None:
+        payload["naver_code"] = error.code
     return jsonify(payload), 502
 
 
@@ -447,6 +481,93 @@ def marketing_allocation_summary():
         return jsonify(repository.marketing_summary(
             workspace_id, _month(), request.args.get("start_date"), request.args.get("end_date")
         ))
+
+
+MANUAL_SPEND_CHANNELS = ("인플루언서", "바이럴", "체험단", "대행사", "콘텐츠제작", "오프라인", "기타")
+
+
+def _manual_spend_values(connection, workspace_id: int, payload: dict):
+    brand_id = int(payload.get("brand_id") or 0)
+    brand = connection.execute("SELECT id FROM brand WHERE id=? AND workspace_id=?", (brand_id, workspace_id)).fetchone()
+    if not brand:
+        raise ValueError("brand must belong to the workspace")
+    product_id = int(payload["product_id"]) if payload.get("product_id") not in (None, "") else None
+    if product_id is not None:
+        product = connection.execute("SELECT brand_id FROM product WHERE id=? AND workspace_id=?", (product_id, workspace_id)).fetchone()
+        if not product or product["brand_id"] is None or int(product["brand_id"]) != brand_id:
+            raise ValueError("product must belong to the selected brand")
+    channel = str(payload.get("channel") or "").strip()
+    if channel not in MANUAL_SPEND_CHANNELS:
+        raise ValueError("unsupported manual marketing channel")
+    start = date.fromisoformat(str(payload.get("start_date") or payload.get("date")))
+    end = date.fromisoformat(str(payload.get("end_date") or payload.get("date")))
+    if start > end or (end - start).days > 366:
+        raise ValueError("invalid manual spend date range")
+    amount = int(payload.get("amount_krw") or 0)
+    if amount <= 0:
+        raise ValueError("amount_krw must be positive")
+    count = (end - start).days + 1
+    base, remainder = divmod(amount, count)
+    rows = []
+    cursor = start
+    for offset in range(count):
+        rows.append((cursor.isoformat(), base + (1 if offset < remainder else 0)))
+        cursor += timedelta(days=1)
+    return brand_id, product_id, channel, str(payload.get("memo") or "").strip() or None, rows
+
+
+@finance_blueprint.route("/manual-marketing-spend", methods=["GET", "POST"])
+@require_server_hmac
+def manual_marketing_spend():
+    workspace_id = _workspace_id(); _authorize("ads", workspace_id)
+    with finance_connection() as connection:
+        FinanceService(FinanceRepository(connection)).require_workspace(workspace_id)
+        if request.method == "GET":
+            rows = [dict(row) for row in connection.execute(
+                "SELECT m.batch_id,MIN(m.date) start_date,MAX(m.date) end_date,SUM(m.amount_krw) amount_krw,"
+                "m.brand_id,m.product_id,m.channel,m.memo,m.allocation_mode,MIN(m.created_at) created_at,b.name brand_name,p.name product_name "
+                "FROM manual_marketing_spend m JOIN brand b ON b.id=m.brand_id AND b.workspace_id=m.workspace_id "
+                "LEFT JOIN product p ON p.id=m.product_id AND p.workspace_id=m.workspace_id WHERE m.workspace_id=? "
+                "GROUP BY m.batch_id,m.brand_id,m.product_id,m.channel,m.memo,m.allocation_mode,b.name,p.name ORDER BY start_date DESC,created_at DESC",
+                (workspace_id,),
+            )]
+            return jsonify(items=rows)
+        payload = _json_payload(); brand_id, product_id, channel, memo, rows = _manual_spend_values(connection, workspace_id, payload)
+        batch_id = str(uuid.uuid4()); mode = "single" if len(rows) == 1 else "range"
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.executemany(
+                "INSERT INTO manual_marketing_spend(id,batch_id,workspace_id,brand_id,product_id,date,channel,amount_krw,memo,allocation_mode) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                [(str(uuid.uuid4()), batch_id, workspace_id, brand_id, product_id, day, channel, amount, memo, mode) for day, amount in rows],
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback(); raise
+        return jsonify(batch_id=batch_id, days=len(rows), amount_krw=sum(amount for _, amount in rows)), 201
+
+
+@finance_blueprint.route("/manual-marketing-spend/<batch_id>", methods=["PATCH", "DELETE"])
+@require_server_hmac
+def manual_marketing_spend_batch(batch_id: str):
+    workspace_id = _workspace_id(); _authorize("ads", workspace_id)
+    with finance_connection() as connection:
+        exists = connection.execute("SELECT 1 FROM manual_marketing_spend WHERE workspace_id=? AND batch_id=?", (workspace_id, batch_id)).fetchone()
+        if not exists: raise LookupError("manual spend batch not found")
+        if request.method == "DELETE":
+            connection.execute("DELETE FROM manual_marketing_spend WHERE workspace_id=? AND batch_id=?", (workspace_id, batch_id)); connection.commit()
+            return "", 204
+        brand_id, product_id, channel, memo, rows = _manual_spend_values(connection, workspace_id, _json_payload())
+        mode = "single" if len(rows) == 1 else "range"
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("DELETE FROM manual_marketing_spend WHERE workspace_id=? AND batch_id=?", (workspace_id, batch_id))
+            connection.executemany(
+                "INSERT INTO manual_marketing_spend(id,batch_id,workspace_id,brand_id,product_id,date,channel,amount_krw,memo,allocation_mode) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                [(str(uuid.uuid4()), batch_id, workspace_id, brand_id, product_id, day, channel, amount, memo, mode) for day, amount in rows],
+            ); connection.commit()
+        except Exception:
+            connection.rollback(); raise
+        return jsonify(batch_id=batch_id, days=len(rows), amount_krw=sum(amount for _, amount in rows))
 
 
 @finance_blueprint.get("/sales-analysis/compare")
@@ -696,6 +817,35 @@ def sync_ad_account(connection_id: int):
         ).fetchone()
         if not account: raise LookupError("ad account connection not found")
         if not account["active"]: raise ValueError("ad account connection is inactive")
+        if account["platform"] == "naver" and start_day != end_day:
+            raise ValueError("Naver sync는 현재 1일 단위로 실행해주세요.")
+        if account["platform"] == "naver":
+            credentials = _naver_credentials(account)
+            if not credentials:
+                return jsonify(error="naver_credentials_not_configured"), 503
+            client = NaverSearchAdsClient(credentials)
+            daily_spend: dict[str, int] = {}
+            cursor = start_day
+            while cursor <= end_day:
+                day = cursor.isoformat()
+                daily_spend[day] = client.daily_cost(day)
+                cursor += timedelta(days=1)
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                for day, amount in daily_spend.items():
+                    external_key = f"naver:{account['account_id']}:{day}:account"
+                    connection.execute(
+                        "INSERT INTO marketing_spend(workspace_id,ad_account_connection_id,brand_id,product_id,date,channel,original_amount,currency,fx_rate,amount_krw,source,external_key) "
+                        "VALUES (?,?,?,NULL,?,'네이버',?,'KRW',1,?,'naver_api',?) ON CONFLICT(workspace_id,source,external_key) DO UPDATE SET "
+                        "ad_account_connection_id=excluded.ad_account_connection_id,brand_id=excluded.brand_id,original_amount=excluded.original_amount,currency='KRW',fx_rate=1,amount_krw=excluded.amount_krw,updated_at=CURRENT_TIMESTAMP",
+                        (workspace_id, connection_id, account["brand_id"], day, amount, amount, external_key),
+                    )
+                connection.execute("UPDATE ad_account_connection SET last_synced_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?", (connection_id, workspace_id))
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+            return jsonify(connection_id=connection_id, raw_saved=0, days_synced=len(daily_spend), zero_spend_days=sum(value == 0 for value in daily_spend.values()), start_date=start, end_date=end, currency="KRW", currency_converted=True)
         if account["platform"] != "meta": raise ValueError("sync is not implemented for this platform")
         token = _credential_token(account, workspace_id)
         if not token: return jsonify(error="meta_token_not_configured"), 503
@@ -793,4 +943,5 @@ def import_workspace(workspace_id: int):
     with finance_connection() as connection:
         result = FinanceService(FinanceRepository(connection)).import_manifest(workspace_id, payload, dry_run)
         return jsonify(result)
+
 
