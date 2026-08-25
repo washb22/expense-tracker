@@ -1894,6 +1894,23 @@ class FinanceApiTest(unittest.TestCase):
         self.assertEqual(combined_product["direct_other_advertising_spend"], 20000)
         self.assertEqual(combined_product["direct_advertising_cost"], 236082)
         self.assertEqual(combined_product["profit_after_direct_advertising"], 763918)
+        self.request("POST", f"/api/sbrocor/finance/v1/ad-accounts/{account['id']}/meta-ads/C/allocation?workspace_id=1", {"allocation_mode": "unassigned", "product_id": None})
+        with closing(connect()) as connection:
+            for ad_id, spend in (("A", 50), ("B", 30), ("C", 20)):
+                connection.execute(
+                    "INSERT INTO ad_spend(workspace_id,date,platform,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,ad_account_connection_id,brand_id) VALUES (1,'2026-08-03','meta','C','Campaign','S','Set',?,?,?, ?,?)",
+                    (ad_id, f"Ad {ad_id}", spend, account["id"], brand_a["id"]),
+                )
+            connection.execute("INSERT INTO marketing_spend(workspace_id,ad_account_connection_id,brand_id,date,channel,original_amount,currency,amount_krw,source,external_key) VALUES (1,?,?,'2026-08-03','Meta',100000,'KRW',100000,'meta_api','meta:v8:3')", (account["id"], brand_a["id"]))
+            connection.commit()
+        fixture_path = f"/api/sbrocor/finance/v1/sales-analysis/compare?workspace_id=1&a_start=2026-08-03&a_end=2026-08-03&b_start=2026-08-03&b_end=2026-08-03"
+        fixture = self.request("GET", fixture_path).json["periods"]["a"]["totals"]["meta_product_attribution"]
+        self.assertEqual((fixture["direct_product_amount"], fixture["brand_common_amount"], fixture["unassigned_amount"], fixture["complete"]), (50000, 30000, 20000, False))
+        self.assertEqual(fixture["direct_product_amount"] + fixture["brand_common_amount"] + fixture["unassigned_amount"], 100000)
+        self.request("POST", f"/api/sbrocor/finance/v1/ad-accounts/{account['id']}/meta-ads/C/allocation?workspace_id=1", {"allocation_mode": "product", "product_id": product_a["id"]})
+        fixture = self.request("GET", fixture_path).json["periods"]["a"]["totals"]["meta_product_attribution"]
+        self.assertEqual((fixture["direct_product_amount"], fixture["brand_common_amount"], fixture["unassigned_amount"], fixture["complete"]), (70000, 30000, 0, True))
+        self.assertEqual(fixture["direct_product_amount"] + fixture["brand_common_amount"] + fixture["unassigned_amount"], 100000)
 
     def test_v8_migration_is_atomic_idempotent_and_preserves_financial_rows(self):
         self.create_workspace(1)
