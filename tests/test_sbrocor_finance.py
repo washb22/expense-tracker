@@ -1957,6 +1957,16 @@ class FinanceApiTest(unittest.TestCase):
             self.assertEqual(response.status_code, 201, response.get_data(as_text=True)); products.append(response.json)
         invalid = self.request("PATCH", "/api/sbrocor/finance/v1/products/901?workspace_id=1", {"product_group_id": other_group["id"]})
         self.assertEqual(invalid.status_code, 400)
+        brand_only = self.request("PATCH", "/api/sbrocor/finance/v1/products/901?workspace_id=1", {"brand_id": other["id"]})
+        self.assertEqual(brand_only.status_code, 400)
+        clear_group = self.request("PATCH", "/api/sbrocor/finance/v1/products/901?workspace_id=1", {"brand_id": other["id"], "product_group_id": None})
+        self.assertEqual(clear_group.status_code, 200)
+        move_group = self.request("PATCH", "/api/sbrocor/finance/v1/products/901?workspace_id=1", {"brand_id": brand["id"], "product_group_id": group["id"]})
+        self.assertEqual(move_group.status_code, 200)
+        simultaneous = self.request("PATCH", "/api/sbrocor/finance/v1/products/901?workspace_id=1", {"brand_id": other["id"], "product_group_id": other_group["id"]})
+        self.assertEqual(simultaneous.status_code, 200)
+        restore = self.request("PATCH", "/api/sbrocor/finance/v1/products/901?workspace_id=1", {"brand_id": brand["id"], "product_group_id": group["id"]})
+        self.assertEqual(restore.status_code, 200)
         employee = {"actor_uid": "employee", "role": "employee", "workspace_ids": [1], "permissions": ["products", "ads"]}
         self.assertEqual(self.request("POST", "/api/sbrocor/finance/v1/product-groups?workspace_id=1", {"name": "금지", "brand_id": brand["id"]}, context=employee).status_code, 403)
         platform = self.request("POST", "/api/sbrocor/finance/v1/platforms?workspace_id=1", {"name": "자사몰", "commission_rate": 0}).json

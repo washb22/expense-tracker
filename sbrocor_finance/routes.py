@@ -561,11 +561,14 @@ def _resource_item(resource: str, item_id: str):
             payload = _json_payload()
             if resource == "products":
                 current_product = repository.get_resource("products", workspace_id, item_id)
+                if not current_product:
+                    raise LookupError("product not found")
                 effective_brand = payload.get("brand_id", current_product.get("brand_id") if current_product else None)
                 if effective_brand not in (None, "") and not repository.get_resource("brands", workspace_id, str(effective_brand)):
                     raise ValueError("product brand must belong to the same workspace")
-                if payload.get("product_group_id") not in (None, ""):
-                    group = repository.get_resource("product-groups", workspace_id, str(payload["product_group_id"]))
+                effective_group = payload.get("product_group_id", current_product.get("product_group_id"))
+                if effective_group not in (None, ""):
+                    group = repository.get_resource("product-groups", workspace_id, str(effective_group))
                     if not group or effective_brand in (None, "") or int(group["brand_id"]) != int(effective_brand):
                         raise ValueError("product group must belong to the product brand")
             if resource == "product-groups":
