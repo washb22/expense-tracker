@@ -731,8 +731,8 @@ class FinanceRepository:
                     (workspace_id, start_date, end_date),
                 )
             }
-            missing_coverage = [
-                {"platform": platform, "account_name": str(account["account_name"]), "date": day}
+            missing_account_days = [
+                {"platform": platform, "account_id": int(account["id"]), "account_name": str(account["account_name"]), "date": day}
                 for platform, accounts, synced_keys in (
                     ("meta", meta_account_rows, meta_synced_keys),
                     ("naver", naver_account_rows, naver_synced_keys),
@@ -827,7 +827,7 @@ class FinanceRepository:
                     "account_count": analysis_accounts,
                     "meta": {"account_count": meta_accounts, "account_days_expected": meta_expected, "account_days_synced": meta_synced_rows, "complete": meta_complete},
                     "naver": {"account_count": naver_accounts, "account_days_expected": naver_expected, "account_days_synced": naver_synced_rows, "complete": naver_complete},
-                    "missing": missing_coverage,
+                    "missing_account_days": missing_account_days,
                 },
                 "naver_attribution": {
                     "complete": int(naver_unmapped["amount"] or 0) == 0,

@@ -1203,8 +1203,8 @@ class FinanceApiTest(unittest.TestCase):
         incomplete = self.request("GET", path).json["periods"]["a"]["totals"]
         self.assertEqual(incomplete["spend_coverage"]["account_days_expected"], 2)
         self.assertEqual(incomplete["spend_coverage"]["account_days_synced"], 1)
-        self.assertEqual(incomplete["spend_coverage"]["missing"], [{
-            "platform": "meta", "account_name": "불완전", "date": "2026-08-02",
+        self.assertEqual(incomplete["spend_coverage"]["missing_account_days"], [{
+            "platform": "meta", "account_id": account["id"], "account_name": "불완전", "date": "2026-08-02",
         }])
         self.assertFalse(incomplete["spend_analysis_ready"])
         self.assertIsNone(incomplete["actual_advertising_spend"])
