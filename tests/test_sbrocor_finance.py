@@ -793,8 +793,9 @@ class FinanceApiTest(unittest.TestCase):
         product_b = next(item for item in payload["products"] if item["id"] == 12)
         self.assertEqual(product_a["periods"]["a"]["direct_advertising_cost"], 100)
         self.assertEqual(product_a["periods"]["b"]["profit_after_advertising"], 500)
-        self.assertFalse(product_b["periods"]["a"]["direct_advertising_available"])
-        self.assertIsNone(product_b["periods"]["a"]["profit_after_advertising"])
+        self.assertTrue(product_b["periods"]["a"]["direct_advertising_available"])
+        self.assertEqual(product_b["periods"]["a"]["direct_advertising_cost"], 0)
+        self.assertEqual(product_b["periods"]["a"]["profit_after_advertising"], 200)
 
         product_path = path + "&product_id=11"
         product_payload = self.request("GET", product_path).json
@@ -1202,6 +1203,9 @@ class FinanceApiTest(unittest.TestCase):
         incomplete = self.request("GET", path).json["periods"]["a"]["totals"]
         self.assertEqual(incomplete["spend_coverage"]["account_days_expected"], 2)
         self.assertEqual(incomplete["spend_coverage"]["account_days_synced"], 1)
+        self.assertEqual(incomplete["spend_coverage"]["missing_account_days"], [{
+            "platform": "meta", "account_id": account["id"], "account_name": "불완전", "date": "2026-08-02",
+        }])
         self.assertFalse(incomplete["spend_analysis_ready"])
         self.assertIsNone(incomplete["actual_advertising_spend"])
 
@@ -1998,6 +2002,14 @@ class FinanceApiTest(unittest.TestCase):
         sku = {row["id"]: row for row in result["products"]}[901]["periods"]["a"]
         self.assertEqual(sku["direct_meta_advertising_spend"], 100000)
         self.assertEqual(sku["direct_advertising_cost"], 150000)
+        self.assertEqual(sku["product_group_direct_meta_spend"], 800000)
+        self.assertEqual(sku["profit_after_direct_advertising"], 850000)
+        zero_direct = {row["id"]: row for row in result["products"]}[902]
+        self.assertEqual((zero_direct["product_group_id"], zero_direct["product_group_name"]), (group["id"], "뽀글솔"))
+        self.assertTrue(zero_direct["periods"]["a"]["direct_advertising_available"])
+        self.assertEqual(zero_direct["periods"]["a"]["direct_advertising_cost"], 0)
+        self.assertEqual(zero_direct["periods"]["a"]["product_group_direct_meta_spend"], 800000)
+        self.assertEqual(zero_direct["periods"]["a"]["profit_after_direct_advertising"], 1000000)
         self.request("PATCH", f"/api/sbrocor/finance/v1/product-groups/{group['id']}?workspace_id=1", {"active": False})
         preserved = self.request("GET", path).json["product_groups"][0]
         self.assertEqual((preserved["active"], preserved["periods"]["a"]["direct_advertising_cost"]), (0, 950000))

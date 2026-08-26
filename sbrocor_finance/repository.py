@@ -567,8 +567,9 @@ class FinanceRepository:
             paid_scope = " AND a.brand_id=?"; paid_params.append(brand_id)
 
         product_rows = [dict(row) for row in self.connection.execute(
-            "SELECT p.id,p.name,p.brand_id,b.name brand_name FROM product p "
+            "SELECT p.id,p.name,p.brand_id,b.name brand_name,p.product_group_id,pg.name product_group_name FROM product p "
             "LEFT JOIN brand b ON b.id=p.brand_id AND b.workspace_id=p.workspace_id "
+            "LEFT JOIN product_group pg ON pg.id=p.product_group_id AND pg.workspace_id=p.workspace_id "
             "WHERE p.workspace_id=?" +
             (" AND p.id=?" if product_id is not None else " AND p.brand_id=?" if brand_id is not None else "") +
             " ORDER BY p.name,p.id", (workspace_id, *( [product_id] if product_id is not None else [brand_id] if brand_id is not None else [] )),
@@ -692,6 +693,54 @@ class FinanceRepository:
                 "AND na.workspace_id=sd.workspace_id WHERE sd.workspace_id=? AND sd.date>=? AND sd.date<=?",
                 (workspace_id, start_date, end_date),
             ).fetchone()[0])
+            period_dates = []
+            coverage_cursor = date.fromisoformat(start_date)
+            coverage_end = date.fromisoformat(end_date)
+            while coverage_cursor <= coverage_end:
+                period_dates.append(coverage_cursor.isoformat())
+                coverage_cursor += timedelta(days=1)
+            meta_account_rows = [dict(row) for row in self.connection.execute(
+                "SELECT ac.id,ac.account_name FROM ad_account_connection ac WHERE ac.workspace_id=? AND ac.platform='meta'" +
+                (" AND ac.brand_id=?" if brand_id is not None else "") +
+                " AND (ac.active=1 OR EXISTS(SELECT 1 FROM marketing_spend ms WHERE ms.workspace_id=ac.workspace_id "
+                "AND ms.ad_account_connection_id=ac.id AND ms.source!='naver_api' AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=?))",
+                [workspace_id, *( [brand_id] if brand_id is not None else [] ), start_date, end_date],
+            )]
+            meta_synced_keys = {
+                (int(row[0]), str(row[1])) for row in self.connection.execute(
+                    "SELECT ms.ad_account_connection_id,substr(ms.date,1,10) sync_date "
+                    "FROM marketing_spend ms JOIN ad_account_connection ac ON ac.id=ms.ad_account_connection_id "
+                    "WHERE ms.workspace_id=? AND ac.platform='meta' AND ms.source!='naver_api' "
+                    "AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=?" +
+                    (" AND ms.brand_id=?" if brand_id is not None else "") +
+                    " GROUP BY ms.ad_account_connection_id,substr(ms.date,1,10)",
+                    [workspace_id, start_date, end_date, *( [brand_id] if brand_id is not None else [] )],
+                )
+            }
+            naver_account_rows = [dict(row) for row in self.connection.execute(
+                "SELECT na.id,na.account_name FROM naver_account_connection na WHERE na.workspace_id=? AND "
+                "(na.active=1 OR EXISTS(SELECT 1 FROM naver_account_sync_day sd WHERE sd.workspace_id=na.workspace_id "
+                "AND sd.naver_account_connection_id=na.id AND sd.date>=? AND sd.date<=?))",
+                (workspace_id, start_date, end_date),
+            )]
+            naver_synced_keys = {
+                (int(row[0]), str(row[1])) for row in self.connection.execute(
+                    "SELECT sd.naver_account_connection_id,sd.date FROM naver_account_sync_day sd "
+                    "JOIN naver_account_connection na ON na.id=sd.naver_account_connection_id "
+                    "AND na.workspace_id=sd.workspace_id WHERE sd.workspace_id=? AND sd.date>=? AND sd.date<=?",
+                    (workspace_id, start_date, end_date),
+                )
+            }
+            missing_account_days = [
+                {"platform": platform, "account_id": int(account["id"]), "account_name": str(account["account_name"]), "date": day}
+                for platform, accounts, synced_keys in (
+                    ("meta", meta_account_rows, meta_synced_keys),
+                    ("naver", naver_account_rows, naver_synced_keys),
+                )
+                for account in accounts
+                for day in period_dates
+                if (int(account["id"]), day) not in synced_keys
+            ]
             naver_unmapped = self.connection.execute(
                 "SELECT COALESCE(SUM(amount_krw),0) amount,COUNT(DISTINCT campaign_id) campaigns "
                 "FROM naver_adgroup_spend WHERE workspace_id=? AND date>=? AND date<=? AND brand_id IS NULL",
@@ -778,6 +827,7 @@ class FinanceRepository:
                     "account_count": analysis_accounts,
                     "meta": {"account_count": meta_accounts, "account_days_expected": meta_expected, "account_days_synced": meta_synced_rows, "complete": meta_complete},
                     "naver": {"account_count": naver_accounts, "account_days_expected": naver_expected, "account_days_synced": naver_synced_rows, "complete": naver_complete},
+                    "missing_account_days": missing_account_days,
                 },
                 "naver_attribution": {
                     "complete": int(naver_unmapped["amount"] or 0) == 0,
@@ -865,7 +915,11 @@ class FinanceRepository:
                 meta_unassigned = int(meta_product_attribution["unassigned_by_brand"].get(item_brand_id, 0)) if item_brand_id is not None else 0
                 naver_unassigned = int(naver_unassigned_by_brand.get(item_brand_id, 0)) if item_brand_id is not None else 0
                 attribution_complete = item_brand_id is not None and meta_unassigned == 0 and naver_unassigned == 0
-                direct_available = spend_analysis_ready and attribution_complete and bool(spend and spend["spend_rows"])
+                direct_available = spend_analysis_ready and attribution_complete
+                product_group_id = int(item["product_group_id"]) if item["product_group_id"] is not None else None
+                product_group_direct_meta_spend = int(
+                    meta_product_attribution["direct_by_product_group"].get(product_group_id, 0)
+                ) if product_group_id is not None else 0
                 item["periods"][key] = {
                     **values,
                     "direct_advertising_cost": direct if direct_available else None,
@@ -873,6 +927,7 @@ class FinanceRepository:
                     "direct_meta_advertising_spend": int(spend.get("meta_amount", 0)) if spend else 0,
                     "direct_naver_advertising_spend": int(spend.get("naver_amount", 0)) if spend else 0,
                     "direct_other_advertising_spend": int(spend.get("other_amount", 0)) if spend else 0,
+                    "product_group_direct_meta_spend": product_group_direct_meta_spend,
                     "profit_after_direct_advertising": int(values["sales_profit"]) - direct if direct_available else None,
                     "profit_after_advertising": int(values["sales_profit"]) - direct if direct_available else None,
                     "attribution_complete": attribution_complete,
