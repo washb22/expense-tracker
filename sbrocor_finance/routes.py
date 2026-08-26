@@ -84,16 +84,28 @@ def _validate_adgroup_allocation(
         raise ValueError("product_id is required for product allocation")
     if allocation_mode != "product" and product_id is not None:
         raise ValueError("product_id must be null unless allocation_mode is product")
+    if adgroup["archived"]:
+        raise ValueError("보관된 광고그룹은 복원 후 귀속을 변경해주세요.")
+    if not adgroup["active"]:
+        historical_spend = connection.execute(
+            "SELECT COUNT(*) FROM naver_adgroup_spend WHERE workspace_id=? "
+            "AND naver_account_connection_id=? AND adgroup_id=?",
+            (adgroup["workspace_id"], adgroup["naver_account_connection_id"], adgroup["adgroup_id"]),
+        ).fetchone()[0]
+        if not historical_spend:
+            raise ValueError("과거 집행비가 없는 비활성 광고그룹은 귀속을 변경할 수 없습니다.")
     campaign = connection.execute(
         "SELECT * FROM naver_campaign WHERE workspace_id=? AND naver_account_connection_id=? AND campaign_id=?",
         (adgroup["workspace_id"], adgroup["naver_account_connection_id"], adgroup["campaign_id"]),
     ).fetchone()
     if not campaign:
         raise ValueError("parent campaign not found")
+    if campaign["archived"]:
+        raise ValueError("보관된 캠페인은 복원 후 광고그룹 귀속을 변경해주세요.")
+    if campaign["brand_id"] is None:
+        raise ValueError("먼저 캠페인 브랜드를 지정해주세요.")
     product = None
     if allocation_mode == "product":
-        if campaign["brand_id"] is None:
-            raise ValueError("먼저 캠페인 브랜드를 지정해주세요.")
         product = connection.execute(
             "SELECT * FROM product WHERE id=? AND workspace_id=?", (product_id, adgroup["workspace_id"])
         ).fetchone()
@@ -741,7 +753,11 @@ def naver_adgroups(account_id: int):
         if not connection.execute("SELECT 1 FROM naver_account_connection WHERE id=? AND workspace_id=?", (account_id, workspace_id)).fetchone():
             raise LookupError("Naver account connection not found")
         rows = connection.execute(
-            "SELECT g.*,c.campaign_name,c.brand_id campaign_brand_id,b.name campaign_brand_name,p.name product_name "
+            "SELECT g.*,c.campaign_name,c.brand_id campaign_brand_id,b.name campaign_brand_name,p.name product_name,"
+            "COALESCE((SELECT COUNT(*) FROM naver_adgroup_spend s WHERE s.workspace_id=g.workspace_id "
+            "AND s.naver_account_connection_id=g.naver_account_connection_id AND s.adgroup_id=g.adgroup_id),0) historical_spend_count,"
+            "COALESCE((SELECT SUM(s.amount_krw) FROM naver_adgroup_spend s WHERE s.workspace_id=g.workspace_id "
+            "AND s.naver_account_connection_id=g.naver_account_connection_id AND s.adgroup_id=g.adgroup_id),0) historical_spend_amount "
             "FROM naver_adgroup g JOIN naver_campaign c ON c.workspace_id=g.workspace_id "
             "AND c.naver_account_connection_id=g.naver_account_connection_id AND c.campaign_id=g.campaign_id "
             "LEFT JOIN brand b ON b.id=c.brand_id AND b.workspace_id=c.workspace_id "

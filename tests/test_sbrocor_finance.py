@@ -1547,6 +1547,16 @@ class FinanceApiTest(unittest.TestCase):
                 connection.commit()
             campaign_unmapped = self.request("POST", f"/api/sbrocor/finance/v1/naver-adgroups/{unmapped_group_id}/allocation?workspace_id=1", {"allocation_mode": "product", "product_id": pomegranate["id"]})
             self.assertEqual(campaign_unmapped.status_code, 400)
+            campaign_unmapped_common = self.request("POST", f"/api/sbrocor/finance/v1/naver-adgroups/{unmapped_group_id}/allocation?workspace_id=1", {"allocation_mode": "brand_common"})
+            self.assertEqual(campaign_unmapped_common.status_code, 400)
+            with closing(connect()) as connection:
+                inactive_without_spend_id = connection.execute(
+                    "INSERT INTO naver_adgroup(workspace_id,naver_account_connection_id,campaign_id,adgroup_id,adgroup_name,status,allocation_mode,active) VALUES (1,?,'CAMP','NO_HISTORY','과거 비용 없음','REPORT_ONLY','unassigned',0)",
+                    (account["id"],),
+                ).lastrowid
+                connection.commit()
+            inactive_without_spend = self.request("POST", f"/api/sbrocor/finance/v1/naver-adgroups/{inactive_without_spend_id}/allocation?workspace_id=1", {"allocation_mode": "brand_common"})
+            self.assertEqual(inactive_without_spend.status_code, 400)
             stale_path = f"/api/sbrocor/finance/v1/naver-adgroups/{by_id['GA']['id']}/allocation?workspace_id=1"
             stale_preview = self.request("POST", stale_path, {"allocation_mode": "brand_common", "product_id": None}).json
             with closing(connect()) as connection:
@@ -1569,8 +1579,11 @@ class FinanceApiTest(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT SUM(amount_krw) FROM naver_adgroup_spend").fetchone()[0], 99827)
                 report_only = connection.execute("SELECT * FROM naver_adgroup WHERE adgroup_id='GC'").fetchone()
                 self.assertEqual((report_only["active"], report_only["allocation_mode"], report_only["product_id"]), (0, "unassigned", None))
+                report_only_id = report_only["id"]
                 self.assertEqual(connection.execute("SELECT SUM(amount_krw) FROM naver_adgroup_spend WHERE product_id=101").fetchone()[0], 7910)
                 self.assertEqual(connection.execute("SELECT SUM(amount_krw) FROM naver_adgroup_spend WHERE product_id=102").fetchone()[0], 91840)
+            listed_groups = {row["adgroup_id"]: row for row in self.request("GET", f"/api/sbrocor/finance/v1/naver-accounts/{account['id']}/adgroups?workspace_id=1").json["items"]}
+            self.assertEqual((listed_groups["GC"]["historical_spend_count"], listed_groups["GC"]["historical_spend_amount"]), (1, 77))
             analysis = self.request("GET", f"/api/sbrocor/finance/v1/sales-analysis/compare?workspace_id=1&brand_id={health['id']}&a_start=2026-08-01&a_end=2026-08-01&b_start=2026-08-01&b_end=2026-08-01").json
             totals = analysis["periods"]["a"]["totals"]
             self.assertEqual(totals["actual_advertising_spend"], 99827)
@@ -1578,6 +1591,24 @@ class FinanceApiTest(unittest.TestCase):
             product_rows = {row["id"]: row for row in analysis["products"]}
             self.assertEqual(product_rows[101]["periods"]["a"]["direct_naver_advertising_spend"], 7910)
             self.assertEqual(product_rows[102]["periods"]["a"]["direct_naver_advertising_spend"], 91840)
+
+            historical_path = f"/api/sbrocor/finance/v1/naver-adgroups/{report_only_id}/allocation?workspace_id=1"
+            self.assertEqual(self.request("POST", historical_path, {"allocation_mode": "brand_common"}, context=employee).status_code, 403)
+            historical_preview = self.request("POST", historical_path, {"allocation_mode": "brand_common"}).json
+            historical_applied = self.request("POST", historical_path, {"allocation_mode": "brand_common", "apply": True, "from_allocation_mode": historical_preview["from_allocation_mode"], "from_product_id": historical_preview["from_product_id"], "preview_token": historical_preview["preview_token"]})
+            self.assertEqual(historical_applied.status_code, 200, historical_applied.get_data(as_text=True))
+            brand_common_totals = self.request("GET", f"/api/sbrocor/finance/v1/sales-analysis/compare?workspace_id=1&brand_id={health['id']}&a_start=2026-08-01&a_end=2026-08-01&b_start=2026-08-01&b_end=2026-08-01").json["periods"]["a"]["totals"]
+            self.assertEqual(brand_common_totals["naver_product_attribution"], {"complete": True, "unassigned_amount": 0, "brand_common_amount": 77, "direct_product_amount": 99750})
+
+            product_preview = self.request("POST", historical_path, {"allocation_mode": "product", "product_id": pomegranate["id"]}).json
+            product_applied = self.request("POST", historical_path, {"allocation_mode": "product", "product_id": pomegranate["id"], "apply": True, "from_allocation_mode": product_preview["from_allocation_mode"], "from_product_id": product_preview["from_product_id"], "preview_token": product_preview["preview_token"]})
+            self.assertEqual(product_applied.status_code, 200, product_applied.get_data(as_text=True))
+            product_analysis = self.request("GET", f"/api/sbrocor/finance/v1/sales-analysis/compare?workspace_id=1&brand_id={health['id']}&a_start=2026-08-01&a_end=2026-08-01&b_start=2026-08-01&b_end=2026-08-01").json
+            self.assertEqual({row["id"]: row for row in product_analysis["products"]}[pomegranate["id"]]["periods"]["a"]["direct_naver_advertising_spend"], 7987)
+            with closing(connect()) as connection:
+                self.assertEqual(connection.execute("SELECT amount_krw FROM naver_adgroup_spend WHERE adgroup_id='GC'").fetchone()[0], 77)
+                connection.execute("UPDATE naver_adgroup SET archived=1 WHERE id=?", (report_only_id,)); connection.commit()
+            self.assertEqual(self.request("POST", historical_path, {"allocation_mode": "brand_common"}).status_code, 400)
 
             # API/parser failure occurs before replacement; DB failure rolls back the deleted day.
             with patch("sbrocor_finance.routes.NaverSearchAdsClient.daily_adgroup_costs", side_effect=NaverApiError("fixture failure")):
@@ -1782,6 +1813,8 @@ class FinanceApiTest(unittest.TestCase):
             self.assertEqual((archived_campaign.json["archived"], archived_campaign.json["brand_id"]), (1, brand["id"]))
             self.assertEqual((archived_product.json["archived"], archived_product.json["allocation_mode"], archived_product.json["product_id"]), (1, "product", product["id"]))
             self.assertEqual((archived_unassigned.json["archived"], archived_unassigned.json["allocation_mode"], archived_unassigned.json["product_id"]), (1, "unassigned", None))
+            archived_allocation = self.request("POST", f"/api/sbrocor/finance/v1/naver-adgroups/{product_group_id}/allocation?workspace_id=1", {"allocation_mode": "brand_common"})
+            self.assertEqual(archived_allocation.status_code, 400)
             account_item = self.request("GET", "/api/sbrocor/finance/v1/naver-accounts?workspace_id=1").json["items"][0]
             self.assertEqual(account_item["unmapped_campaign_count"], 0)
 
