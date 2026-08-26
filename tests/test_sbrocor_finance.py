@@ -852,7 +852,7 @@ class FinanceApiTest(unittest.TestCase):
         initialize_database(); initialize_database()
         with closing(connect()) as connection:
             after = tuple(connection.execute("SELECT (SELECT COUNT(*) FROM finance_transaction),(SELECT COUNT(*) FROM sale),(SELECT COUNT(*) FROM ad_spend),(SELECT COUNT(*) FROM product),(SELECT SUM(amount) FROM finance_transaction),(SELECT SUM(total_selling_amount) FROM sale),(SELECT SUM(net_profit) FROM sale)").fetchone())
-            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 8)
+            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 9)
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
             self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
             tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -874,7 +874,7 @@ class FinanceApiTest(unittest.TestCase):
         with closing(connect()) as connection:
             after = tuple(connection.execute("SELECT (SELECT COUNT(*) FROM finance_transaction),(SELECT COUNT(*) FROM sale),(SELECT COUNT(*) FROM ad_spend),(SELECT COUNT(*) FROM marketing_spend),(SELECT COUNT(*) FROM product),(SELECT COALESCE(SUM(amount_krw),0) FROM marketing_spend)").fetchone())
             self.assertEqual(before, after)
-            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 8)
+            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 9)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM manual_marketing_spend").fetchone()[0], 0)
             self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
@@ -905,7 +905,7 @@ class FinanceApiTest(unittest.TestCase):
         with closing(connect()) as connection:
             after = tuple(connection.execute("SELECT (SELECT COUNT(*) FROM finance_transaction),(SELECT COUNT(*) FROM sale),(SELECT COUNT(*) FROM ad_spend),(SELECT COUNT(*) FROM marketing_spend),(SELECT COALESCE(SUM(amount_krw),0) FROM marketing_spend),(SELECT COUNT(*) FROM manual_marketing_spend),(SELECT COUNT(*) FROM product)").fetchone())
             self.assertEqual(before, after)
-            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 8)
+            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 9)
             copied = connection.execute("SELECT * FROM naver_account_connection WHERE workspace_id=1 AND customer_id='999569'").fetchone()
             self.assertEqual(copied["legacy_ad_account_connection_id"], legacy["id"])
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM marketing_spend WHERE source='naver_api'").fetchone()[0], 1)
@@ -951,7 +951,7 @@ class FinanceApiTest(unittest.TestCase):
                 initialize_database(path)
                 initialize_database(path)
                 with closing(connect(path)) as connection:
-                    self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 8)
+                    self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 9)
                     self.assertEqual(tuple(connection.execute("SELECT COUNT(*),SUM(amount) FROM finance_transaction").fetchone()), (1, 123))
                     self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
 
@@ -984,7 +984,7 @@ class FinanceApiTest(unittest.TestCase):
         with closing(connect()) as connection:
             after = tuple(connection.execute("SELECT (SELECT COUNT(*) FROM finance_transaction),(SELECT SUM(amount) FROM finance_transaction),(SELECT COUNT(*) FROM sale),(SELECT COUNT(*) FROM product),(SELECT COUNT(*) FROM ad_spend),(SELECT COUNT(*) FROM marketing_spend),(SELECT COUNT(*) FROM manual_marketing_spend),(SELECT COUNT(*) FROM naver_account_connection),(SELECT COUNT(*) FROM naver_campaign),(SELECT COUNT(*) FROM naver_campaign_spend)").fetchone())
             self.assertEqual(before, after)
-            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 8)
+            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 9)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM naver_adgroup").fetchone()[0], 0)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM naver_adgroup_spend").fetchone()[0], 0)
             self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
@@ -1022,7 +1022,7 @@ class FinanceApiTest(unittest.TestCase):
                     self.assertEqual(tuple(connection.execute("SELECT COUNT(*),SUM(amount) FROM finance_transaction").fetchone()), (1, 123))
                 initialize_database(path); initialize_database(path)
                 with closing(connect(path)) as connection:
-                    self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 8)
+                    self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 9)
                     self.assertEqual(tuple(connection.execute("SELECT COUNT(*),SUM(amount) FROM finance_transaction").fetchone()), (1, 123))
 
     def test_legacy_naver_cleanup_is_exact_fail_closed_and_rolls_back(self):
@@ -1780,7 +1780,7 @@ class FinanceApiTest(unittest.TestCase):
         with closing(connect()) as connection:
             after = tuple(connection.execute("SELECT (SELECT COUNT(*) FROM finance_transaction),(SELECT SUM(amount) FROM finance_transaction),(SELECT COUNT(*) FROM sale),(SELECT COUNT(*) FROM product),(SELECT COUNT(*) FROM ad_spend),(SELECT COUNT(*) FROM marketing_spend),(SELECT COUNT(*) FROM manual_marketing_spend),(SELECT COUNT(*) FROM naver_account_connection),(SELECT COUNT(*) FROM naver_campaign),(SELECT COUNT(*) FROM naver_adgroup),(SELECT COUNT(*) FROM naver_adgroup_spend)").fetchone())
             self.assertEqual(before, after)
-            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 8)
+            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 9)
             self.assertEqual(tuple(connection.execute("SELECT brand_id,archived,archived_at FROM naver_campaign WHERE campaign_id='C'").fetchone()), (brand["id"], 0, None))
             self.assertEqual(tuple(connection.execute("SELECT allocation_mode,product_id,archived,archived_at FROM naver_adgroup WHERE adgroup_id='G'").fetchone()), ("product", product["id"], 0, None))
             self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
@@ -1945,6 +1945,84 @@ class FinanceApiTest(unittest.TestCase):
         self.assertEqual((fixture["direct_product_amount"], fixture["brand_common_amount"], fixture["unassigned_amount"], fixture["complete"]), (70000, 30000, 0, True))
         self.assertEqual(fixture["direct_product_amount"] + fixture["brand_common_amount"] + fixture["unassigned_amount"], 100000)
 
+    def test_v9_product_group_meta_attribution_and_no_double_count(self):
+        self.create_workspace(1); self.create_workspace(2)
+        brand = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "파파랑"}).json
+        other = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "기타"}).json
+        group = self.request("POST", "/api/sbrocor/finance/v1/product-groups?workspace_id=1", {"name": "뽀글솔", "brand_id": brand["id"]}).json
+        other_group = self.request("POST", "/api/sbrocor/finance/v1/product-groups?workspace_id=1", {"name": "타브랜드", "brand_id": other["id"]}).json
+        products = []
+        for product_id, name in ((901, "뽀글솔"), (902, "뽀글솔 리필"), (903, "뽀글솔+리필")):
+            response = self.request("POST", "/api/sbrocor/finance/v1/products?workspace_id=1", {"id": product_id, "name": name, "cost_price": 1, "brand_id": brand["id"], "product_group_id": group["id"]})
+            self.assertEqual(response.status_code, 201, response.get_data(as_text=True)); products.append(response.json)
+        invalid = self.request("PATCH", "/api/sbrocor/finance/v1/products/901?workspace_id=1", {"product_group_id": other_group["id"]})
+        self.assertEqual(invalid.status_code, 400)
+        employee = {"actor_uid": "employee", "role": "employee", "workspace_ids": [1], "permissions": ["products", "ads"]}
+        self.assertEqual(self.request("POST", "/api/sbrocor/finance/v1/product-groups?workspace_id=1", {"name": "금지", "brand_id": brand["id"]}, context=employee).status_code, 403)
+        platform = self.request("POST", "/api/sbrocor/finance/v1/platforms?workspace_id=1", {"name": "자사몰", "commission_rate": 0}).json
+        account = self.request("POST", "/api/sbrocor/finance/v1/ad-accounts?workspace_id=1", {"brand_id": brand["id"], "platform": "meta", "account_id": "act-v9", "account_name": "Meta", "currency": "KRW", "credential_key": "M"}).json
+        with closing(connect()) as connection:
+            for index, product in enumerate(products):
+                connection.execute("INSERT INTO sale(id,workspace_id,date,product_id,platform_id,selling_price,quantity,total_selling_amount,total_cost_amount,commission_amount,net_profit) VALUES (?,1,'2026-08-01',?,?,1000000,1,1000000,0,0,1000000)", (f"v9-sale-{index}", product["id"], platform["id"]))
+            for ad_id, raw in (("GROUP", 800), ("PRODUCT", 100), ("COMMON", 100)):
+                connection.execute("INSERT INTO ad_spend(workspace_id,date,platform,ad_id,ad_name,spend,ad_account_connection_id,brand_id) VALUES (1,'2026-08-01','meta',?,?,?, ?,?)", (ad_id, ad_id, raw, account["id"], brand["id"]))
+            connection.execute("INSERT INTO marketing_spend(workspace_id,ad_account_connection_id,brand_id,date,channel,original_amount,currency,amount_krw,source,external_key) VALUES (1,?,?, '2026-08-01','Meta',1000000,'KRW',1000000,'meta_api','meta:v9')", (account["id"], brand["id"]))
+            naver_id = connection.execute("INSERT INTO naver_account_connection(workspace_id,customer_id,account_name,credential_key,active) VALUES (1,'v9-naver','Naver','N',0)").lastrowid
+            connection.execute("INSERT INTO naver_adgroup_spend(workspace_id,naver_account_connection_id,campaign_id,adgroup_id,brand_id,product_id,allocation_mode,date,amount_krw,external_key) VALUES (1,?,'C','G',?,?,'product','2026-08-01',50000,'naver:v9')", (naver_id, brand["id"], products[0]["id"]))
+            connection.execute("INSERT INTO naver_account_sync_day(workspace_id,naver_account_connection_id,date,total_amount_krw,adgroup_count,product_attributed_amount_krw) VALUES (1,?,'2026-08-01',50000,1,50000)", (naver_id,))
+            connection.commit()
+        self.assertEqual(self.request("POST", f"/api/sbrocor/finance/v1/ad-accounts/{account['id']}/meta-ads/GROUP/allocation?workspace_id=1", {"allocation_mode": "product_group", "product_group_id": group["id"]}).status_code, 200)
+        self.assertEqual(self.request("POST", f"/api/sbrocor/finance/v1/ad-accounts/{account['id']}/meta-ads/PRODUCT/allocation?workspace_id=1", {"allocation_mode": "product", "product_id": products[0]["id"]}).status_code, 200)
+        self.assertEqual(self.request("POST", f"/api/sbrocor/finance/v1/ad-accounts/{account['id']}/meta-ads/COMMON/allocation?workspace_id=1", {"allocation_mode": "brand_common"}).status_code, 200)
+        cross = self.request("POST", f"/api/sbrocor/finance/v1/ad-accounts/{account['id']}/meta-ads/GROUP/allocation?workspace_id=1", {"allocation_mode": "product_group", "product_group_id": other_group["id"]})
+        self.assertEqual(cross.status_code, 400)
+        self.assertEqual(self.request("POST", f"/api/sbrocor/finance/v1/ad-accounts/{account['id']}/meta-ads/GROUP/allocation?workspace_id=1", {"allocation_mode": "brand_common"}, context=employee).status_code, 403)
+        path = f"/api/sbrocor/finance/v1/sales-analysis/compare?workspace_id=1&brand_id={brand['id']}&a_start=2026-08-01&a_end=2026-08-01&b_start=2026-08-01&b_end=2026-08-01"
+        result = self.request("GET", path).json
+        meta = result["periods"]["a"]["totals"]["meta_product_attribution"]
+        self.assertEqual((meta["direct_product_group_amount"], meta["direct_product_amount"], meta["brand_common_amount"]), (800000, 100000, 100000))
+        self.assertEqual(sum((meta["direct_product_group_amount"], meta["direct_product_amount"], meta["brand_common_amount"], meta["unassigned_amount"])), 1000000)
+        group_period = result["product_groups"][0]["periods"]["a"]
+        self.assertEqual((group_period["sales_profit"], group_period["direct_meta_group_spend"], group_period["direct_meta_product_spend"], group_period["direct_naver_product_spend"]), (3000000, 800000, 100000, 50000))
+        self.assertEqual((group_period["direct_advertising_cost"], group_period["profit_after_advertising"]), (950000, 2050000))
+        sku = {row["id"]: row for row in result["products"]}[901]["periods"]["a"]
+        self.assertEqual(sku["direct_meta_advertising_spend"], 100000)
+        self.assertEqual(sku["direct_advertising_cost"], 150000)
+        self.request("PATCH", f"/api/sbrocor/finance/v1/product-groups/{group['id']}?workspace_id=1", {"active": False})
+        preserved = self.request("GET", path).json["product_groups"][0]
+        self.assertEqual((preserved["active"], preserved["periods"]["a"]["direct_advertising_cost"]), (0, 950000))
+
+    def test_v9_migration_is_atomic_idempotent_and_preserves_v8_rows(self):
+        self.create_workspace(1)
+        with closing(connect()) as connection:
+            connection.execute("INSERT INTO finance_transaction(id,workspace_id,date,merchant,amount,category) VALUES ('v9',1,'2026-08-01','fixture',123,'광고비')")
+            connection.execute("DROP INDEX IF EXISTS ix_meta_ad_allocation_product_group")
+            connection.execute("DROP INDEX IF EXISTS ix_product_workspace_group")
+            connection.execute("DROP INDEX IF EXISTS ix_product_group_workspace_brand")
+            connection.execute("ALTER TABLE meta_ad_allocation RENAME TO meta_ad_allocation_current")
+            connection.execute("CREATE TABLE meta_ad_allocation (id INTEGER PRIMARY KEY,workspace_id INTEGER NOT NULL REFERENCES workspace(id),ad_account_connection_id INTEGER NOT NULL REFERENCES ad_account_connection(id),ad_id TEXT NOT NULL,allocation_mode TEXT NOT NULL CHECK(allocation_mode IN ('unassigned','brand_common','product')),product_id INTEGER REFERENCES product(id),created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(workspace_id,ad_account_connection_id,ad_id),CHECK((allocation_mode='product' AND product_id IS NOT NULL) OR (allocation_mode!='product' AND product_id IS NULL)))")
+            connection.execute("DROP TABLE meta_ad_allocation_current")
+            connection.execute("DROP TABLE product_group")
+            connection.execute("DELETE FROM schema_version WHERE version=9")
+            connection.commit()
+        before = None
+        with closing(connect()) as connection:
+            before = tuple(connection.execute("SELECT COUNT(*),SUM(amount) FROM finance_transaction").fetchone())
+        with patch("sbrocor_finance.database._v9_migration_hook", side_effect=RuntimeError("v9 failure")):
+            with self.assertRaisesRegex(RuntimeError, "v9 failure"):
+                initialize_database()
+        with closing(connect()) as connection:
+            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 8)
+            self.assertNotIn("product_group_id", {row[1] for row in connection.execute("PRAGMA table_info(meta_ad_allocation)")})
+            self.assertEqual(tuple(connection.execute("SELECT COUNT(*),SUM(amount) FROM finance_transaction").fetchone()), before)
+        initialize_database(); initialize_database()
+        with closing(connect()) as connection:
+            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 9)
+            self.assertIn("product_group_id", {row[1] for row in connection.execute("PRAGMA table_info(product)")})
+            self.assertEqual(tuple(connection.execute("SELECT COUNT(*),SUM(amount) FROM finance_transaction").fetchone()), before)
+            self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+            self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+
     def test_v8_migration_is_atomic_idempotent_and_preserves_financial_rows(self):
         self.create_workspace(1)
         with closing(connect()) as connection:
@@ -1952,7 +2030,7 @@ class FinanceApiTest(unittest.TestCase):
             connection.execute("DROP INDEX IF EXISTS ix_meta_ad_allocation_connection")
             connection.execute("DROP INDEX IF EXISTS ix_meta_ad_allocation_product")
             connection.execute("DROP TABLE IF EXISTS meta_ad_allocation")
-            connection.execute("DELETE FROM schema_version WHERE version=8")
+            connection.execute("DELETE FROM schema_version WHERE version>=8")
             connection.commit()
         before = None
         with closing(connect()) as connection:
@@ -1966,7 +2044,7 @@ class FinanceApiTest(unittest.TestCase):
             self.assertEqual(tuple(connection.execute("SELECT COUNT(*),SUM(amount) FROM finance_transaction").fetchone()), before)
         initialize_database(); initialize_database()
         with closing(connect()) as connection:
-            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 8)
+            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 9)
             self.assertEqual(tuple(connection.execute("SELECT COUNT(*),SUM(amount) FROM finance_transaction").fetchone()), before)
             self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
