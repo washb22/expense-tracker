@@ -250,7 +250,7 @@ def _meta_get(
 
 RESOURCE_PERMISSION = {
     "transactions": "transactions", "categories": "categories", "products": "products",
-    "platforms": "products", "brands": "products", "sales": "sales", "ads": "ads",
+    "platforms": "products", "brands": "products", "product-groups": "products", "sales": "sales", "ads": "ads",
     "ad-accounts": "ads",
 }
 
@@ -533,7 +533,7 @@ def ads_analytics():
 
 def _resource_collection(resource: str):
     workspace_id = _workspace_id()
-    _authorize(RESOURCE_PERMISSION[resource], workspace_id, admin_only=resource in {"brands", "ad-accounts"} and request.method != "GET")
+    _authorize(RESOURCE_PERMISSION[resource], workspace_id, admin_only=resource in {"brands", "product-groups", "ad-accounts"} and request.method != "GET")
     with finance_connection() as connection:
         repository = FinanceRepository(connection)
         service = FinanceService(repository)
@@ -551,7 +551,7 @@ def _resource_collection(resource: str):
 
 def _resource_item(resource: str, item_id: str):
     workspace_id = _workspace_id()
-    _authorize(RESOURCE_PERMISSION[resource], workspace_id, admin_only=resource in {"brands", "ad-accounts"} and request.method != "GET")
+    _authorize(RESOURCE_PERMISSION[resource], workspace_id, admin_only=resource in {"brands", "product-groups", "ad-accounts"} and request.method != "GET")
     with finance_connection() as connection:
         repository = FinanceRepository(connection)
         FinanceService(repository).require_workspace(workspace_id)
@@ -559,9 +559,23 @@ def _resource_item(resource: str, item_id: str):
             item = repository.get_resource(resource, workspace_id, item_id)
         elif request.method == "PATCH":
             payload = _json_payload()
-            if resource == "products" and payload.get("brand_id") not in (None, ""):
-                if not repository.get_resource("brands", workspace_id, str(payload["brand_id"])):
+            if resource == "products":
+                current_product = repository.get_resource("products", workspace_id, item_id)
+                if not current_product:
+                    raise LookupError("product not found")
+                effective_brand = payload.get("brand_id", current_product.get("brand_id") if current_product else None)
+                if effective_brand not in (None, "") and not repository.get_resource("brands", workspace_id, str(effective_brand)):
                     raise ValueError("product brand must belong to the same workspace")
+                effective_group = payload.get("product_group_id", current_product.get("product_group_id"))
+                if effective_group not in (None, ""):
+                    group = repository.get_resource("product-groups", workspace_id, str(effective_group))
+                    if not group or effective_brand in (None, "") or int(group["brand_id"]) != int(effective_brand):
+                        raise ValueError("product group must belong to the product brand")
+            if resource == "product-groups":
+                if payload.get("brand_id") not in (None, ""):
+                    raise ValueError("product group brand cannot be changed")
+                if "active" in payload:
+                    payload["active"] = 1 if payload["active"] else 0
             if resource == "transactions":
                 current = repository.get_resource(resource, workspace_id, item_id)
                 allocations = repository.get_marketing_allocations(workspace_id, item_id)
@@ -599,8 +613,8 @@ def _resource_item(resource: str, item_id: str):
                 if "active" in payload: payload["active"] = 1 if payload["active"] else 0
             item = repository.update_resource(resource, workspace_id, item_id, payload)
         else:
-            if resource == "brands":
-                raise ValueError("brands must be deactivated instead of deleted")
+            if resource in {"brands", "product-groups"}:
+                raise ValueError(f"{resource} must be deactivated instead of deleted")
             return ("", 204) if repository.delete_resource(resource, workspace_id, item_id) else (jsonify(error="not_found"), 404)
         if item and resource == "ad-accounts": item = _public_ad_account(item, workspace_id, connection)
         return jsonify(item) if item else (jsonify(error="not_found"), 404)
@@ -1479,13 +1493,15 @@ def meta_ads(connection_id: int):
                       MAX(a.campaign_name) campaign_name,MAX(a.adset_id) adset_id,
                       MAX(a.adset_name) adset_name,MIN(substr(a.date,1,10)) first_spend_date,
                       MAX(substr(a.date,1,10)) last_spend_date,SUM(a.spend) total_raw_spend,
-                      COALESCE(m.allocation_mode,'unassigned') allocation_mode,m.product_id,p.name product_name
+                      COALESCE(m.allocation_mode,'unassigned') allocation_mode,m.product_id,p.name product_name,
+                      m.product_group_id,pg.name product_group_name
                FROM ad_spend a
                LEFT JOIN meta_ad_allocation m ON m.workspace_id=a.workspace_id
                     AND m.ad_account_connection_id=a.ad_account_connection_id AND m.ad_id=a.ad_id
                LEFT JOIN product p ON p.id=m.product_id AND p.workspace_id=m.workspace_id
+               LEFT JOIN product_group pg ON pg.id=m.product_group_id AND pg.workspace_id=m.workspace_id
                WHERE a.workspace_id=? AND a.ad_account_connection_id=? AND a.platform='meta' AND a.ad_id IS NOT NULL
-               GROUP BY a.ad_id,m.allocation_mode,m.product_id,p.name
+               GROUP BY a.ad_id,m.allocation_mode,m.product_id,p.name,m.product_group_id,pg.name
                ORDER BY last_spend_date DESC,campaign_name,adset_name,ad_name,a.ad_id""",
             (workspace_id, connection_id),
         ).fetchall()
@@ -1498,9 +1514,12 @@ def allocate_meta_ad(connection_id: int, ad_id: str):
     workspace_id = _workspace_id(); _authorize("ads", workspace_id, admin_only=True)
     payload = _json_payload(); mode = str(payload.get("allocation_mode", "")).strip()
     product_id = payload.get("product_id")
-    if mode not in {"unassigned", "brand_common", "product"}: raise ValueError("invalid allocation_mode")
+    product_group_id = payload.get("product_group_id")
+    if mode not in {"unassigned", "brand_common", "product", "product_group"}: raise ValueError("invalid allocation_mode")
     if mode == "product" and product_id is None: raise ValueError("product_id is required for product allocation")
     if mode != "product" and product_id is not None: raise ValueError("product_id must be null unless allocation_mode is product")
+    if mode == "product_group" and product_group_id is None: raise ValueError("product_group_id is required for product group allocation")
+    if mode != "product_group" and product_group_id is not None: raise ValueError("product_group_id must be null unless allocation_mode is product_group")
     with finance_connection() as connection:
         account = connection.execute(
             "SELECT id,brand_id,platform FROM ad_account_connection WHERE id=? AND workspace_id=?",
@@ -1517,14 +1536,19 @@ def allocate_meta_ad(connection_id: int, ad_id: str):
             product = connection.execute("SELECT id,brand_id FROM product WHERE id=? AND workspace_id=?", (product_id, workspace_id)).fetchone()
             if not product or product["brand_id"] is None or int(product["brand_id"]) != int(account["brand_id"]):
                 raise ValueError("Meta 광고 제품은 광고계정과 같은 브랜드여야 합니다.")
+        if mode == "product_group":
+            group = connection.execute("SELECT id,brand_id FROM product_group WHERE id=? AND workspace_id=?", (product_group_id, workspace_id)).fetchone()
+            if not group or int(group["brand_id"]) != int(account["brand_id"]):
+                raise ValueError("Meta 광고 상품군은 광고계정과 같은 브랜드여야 합니다.")
         connection.execute(
-            """INSERT INTO meta_ad_allocation(workspace_id,ad_account_connection_id,ad_id,allocation_mode,product_id)
-               VALUES (?,?,?,?,?) ON CONFLICT(workspace_id,ad_account_connection_id,ad_id) DO UPDATE SET
-               allocation_mode=excluded.allocation_mode,product_id=excluded.product_id,updated_at=CURRENT_TIMESTAMP""",
-            (workspace_id, connection_id, ad_id, mode, product_id),
+            """INSERT INTO meta_ad_allocation(workspace_id,ad_account_connection_id,ad_id,allocation_mode,product_id,product_group_id)
+               VALUES (?,?,?,?,?,?) ON CONFLICT(workspace_id,ad_account_connection_id,ad_id) DO UPDATE SET
+               allocation_mode=excluded.allocation_mode,product_id=excluded.product_id,
+               product_group_id=excluded.product_group_id,updated_at=CURRENT_TIMESTAMP""",
+            (workspace_id, connection_id, ad_id, mode, product_id, product_group_id),
         )
         connection.commit()
-        return jsonify(connection_id=connection_id, ad_id=ad_id, allocation_mode=mode, product_id=product_id)
+        return jsonify(connection_id=connection_id, ad_id=ad_id, allocation_mode=mode, product_id=product_id, product_group_id=product_group_id)
 
 
 @finance_blueprint.get("/workspaces/<int:workspace_id>/export")

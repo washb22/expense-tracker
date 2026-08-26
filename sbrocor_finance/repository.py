@@ -29,9 +29,14 @@ RESOURCE_CONFIG = {
         "fields": ("id", "name", "active", "created_at"),
         "required": ("name",),
     },
+    "product-groups": {
+        "table": "product_group",
+        "fields": ("id", "brand_id", "name", "active", "created_at", "updated_at"),
+        "required": ("brand_id", "name"),
+    },
     "products": {
         "table": "product",
-        "fields": ("id", "name", "sku", "cost_price", "category", "brand_id", "created_at"),
+        "fields": ("id", "name", "sku", "cost_price", "category", "brand_id", "product_group_id", "created_at"),
         "required": ("name", "cost_price"),
     },
     "platforms": {
@@ -163,8 +168,11 @@ class FinanceRepository:
         order = "date DESC, id DESC" if "date" in config["fields"] else "id DESC"
         select = "*"
         if resource == "products":
-            select = "product.*, brand.name brand_name, (SELECT COUNT(*) FROM sale WHERE sale.workspace_id=product.workspace_id AND sale.product_id=product.id) sale_count"
-            table = "product LEFT JOIN brand ON brand.id=product.brand_id AND brand.workspace_id=product.workspace_id"
+            select = "product.*, brand.name brand_name, product_group.name product_group_name, (SELECT COUNT(*) FROM sale WHERE sale.workspace_id=product.workspace_id AND sale.product_id=product.id) sale_count"
+            table = "product LEFT JOIN brand ON brand.id=product.brand_id AND brand.workspace_id=product.workspace_id LEFT JOIN product_group ON product_group.id=product.product_group_id AND product_group.workspace_id=product.workspace_id"
+        elif resource == "product-groups":
+            select = "product_group.*, brand.name brand_name"
+            table = "product_group JOIN brand ON brand.id=product_group.brand_id AND brand.workspace_id=product_group.workspace_id"
         elif resource == "platforms":
             select = "platform.*, (SELECT COUNT(*) FROM sale WHERE sale.workspace_id=platform.workspace_id AND sale.platform_id=platform.id) sale_count"
         rows = self.connection.execute(
@@ -208,6 +216,8 @@ class FinanceRepository:
         fields = [field for field in config["fields"] if field != "id" and field in payload]
         if fields:
             assignments = ",".join(f"{field}=?" for field in fields)
+            if resource == "product-groups" and "updated_at" not in fields:
+                assignments += ",updated_at=CURRENT_TIMESTAMP"
             self.connection.execute(
                 f"UPDATE {config['table']} SET {assignments} WHERE id=? AND workspace_id=?",
                 [*(payload[field] for field in fields), item_id, workspace_id],
@@ -384,11 +394,12 @@ class FinanceRepository:
         allocations = {
             (int(row["ad_account_connection_id"]), str(row["ad_id"])): dict(row)
             for row in self.connection.execute(
-                "SELECT ad_account_connection_id,ad_id,allocation_mode,product_id FROM meta_ad_allocation "
+                "SELECT ad_account_connection_id,ad_id,allocation_mode,product_id,product_group_id FROM meta_ad_allocation "
                 "WHERE workspace_id=?", (workspace_id,),
             )
         }
         direct_by_product: dict[int, int] = {}
+        direct_by_product_group: dict[int, int] = {}
         unassigned_by_brand: dict[int, int] = {}
         brand_common = unassigned = unavailable = 0
         for total in totals:
@@ -421,11 +432,14 @@ class FinanceRepository:
             for entry in sorted(floors, key=lambda value: (-value[2], value[0]))[: amount - assigned]:
                 entry[1] += 1
             for ad_id, allocated, _remainder in floors:
-                mapping = allocations.get((connection_id, ad_id), {"allocation_mode": "unassigned", "product_id": None})
+                mapping = allocations.get((connection_id, ad_id), {"allocation_mode": "unassigned", "product_id": None, "product_group_id": None})
                 mode = mapping["allocation_mode"]
                 if mode == "product" and mapping["product_id"] is not None:
                     product_key = int(mapping["product_id"])
                     direct_by_product[product_key] = direct_by_product.get(product_key, 0) + int(allocated)
+                elif mode == "product_group" and mapping["product_group_id"] is not None:
+                    group_key = int(mapping["product_group_id"])
+                    direct_by_product_group[group_key] = direct_by_product_group.get(group_key, 0) + int(allocated)
                 elif mode == "brand_common":
                     brand_common += int(allocated)
                 else:
@@ -434,12 +448,72 @@ class FinanceRepository:
         return {
             "direct_by_product": direct_by_product,
             "direct_product_amount": sum(direct_by_product.values()),
+            "direct_by_product_group": direct_by_product_group,
+            "direct_product_group_amount": sum(direct_by_product_group.values()),
             "brand_common_amount": brand_common,
             "unassigned_amount": unassigned,
             "unassigned_by_brand": unassigned_by_brand,
             "unavailable_amount": unavailable,
             "complete": unassigned == 0,
         }
+
+    def _product_group_analysis(
+        self, workspace_id: int, periods: dict[str, tuple[str, str]], brand_id: int | None
+    ) -> list[dict[str, Any]]:
+        groups = [dict(row) for row in self.connection.execute(
+            "SELECT pg.id,pg.name,pg.brand_id,pg.active,b.name brand_name FROM product_group pg "
+            "JOIN brand b ON b.id=pg.brand_id AND b.workspace_id=pg.workspace_id "
+            "WHERE pg.workspace_id=?" + (" AND pg.brand_id=?" if brand_id is not None else "") +
+            " ORDER BY pg.name,pg.id", [workspace_id, *( [brand_id] if brand_id is not None else [] )],
+        )]
+        for group in groups:
+            group["periods"] = {}
+            group_id = int(group["id"])
+            group_brand_id = int(group["brand_id"])
+            product_ids = [int(row[0]) for row in self.connection.execute(
+                "SELECT id FROM product WHERE workspace_id=? AND product_group_id=?", (workspace_id, group_id)
+            )]
+            for key, (start_date, end_date) in periods.items():
+                sales = dict(self.connection.execute(
+                    "SELECT COALESCE(SUM(s.total_selling_amount),0) revenue,COALESCE(SUM(s.quantity),0) quantity,"
+                    "COALESCE(SUM(s.net_profit),0) sales_profit FROM sale s JOIN product p ON p.id=s.product_id "
+                    "AND p.workspace_id=s.workspace_id WHERE s.workspace_id=? AND p.product_group_id=? "
+                    "AND substr(s.date,1,10)>=? AND substr(s.date,1,10)<=?",
+                    (workspace_id, group_id, start_date, end_date),
+                ).fetchone())
+                meta = self._meta_product_attribution(workspace_id, start_date, end_date, group_brand_id)
+                meta_group = int(meta["direct_by_product_group"].get(group_id, 0))
+                meta_product = sum(int(meta["direct_by_product"].get(pid, 0)) for pid in product_ids)
+                naver_product = int(self.connection.execute(
+                    "SELECT COALESCE(SUM(ns.amount_krw),0) FROM naver_adgroup_spend ns JOIN product p "
+                    "ON p.id=ns.product_id AND p.workspace_id=ns.workspace_id WHERE ns.workspace_id=? "
+                    "AND ns.allocation_mode='product' AND p.product_group_id=? AND ns.date>=? AND ns.date<=?",
+                    (workspace_id, group_id, start_date, end_date),
+                ).fetchone()[0])
+                other_product = int(self.connection.execute(
+                    "SELECT COALESCE(SUM(ms.amount_krw),0) FROM marketing_spend ms JOIN product p "
+                    "ON p.id=ms.product_id AND p.workspace_id=ms.workspace_id WHERE ms.workspace_id=? "
+                    "AND ms.source NOT IN ('meta_api','naver_api') AND p.product_group_id=? "
+                    "AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=?",
+                    (workspace_id, group_id, start_date, end_date),
+                ).fetchone()[0])
+                other_product += int(self.connection.execute(
+                    "SELECT COALESCE(SUM(m.amount_krw),0) FROM manual_marketing_spend m JOIN product p "
+                    "ON p.id=m.product_id AND p.workspace_id=m.workspace_id WHERE m.workspace_id=? "
+                    "AND p.product_group_id=? AND substr(m.date,1,10)>=? AND substr(m.date,1,10)<=?",
+                    (workspace_id, group_id, start_date, end_date),
+                ).fetchone()[0])
+                direct = meta_group + meta_product + naver_product + other_product
+                group["periods"][key] = {
+                    **sales,
+                    "direct_meta_group_spend": meta_group,
+                    "direct_meta_product_spend": meta_product,
+                    "direct_naver_product_spend": naver_product,
+                    "direct_other_product_spend": other_product,
+                    "direct_advertising_cost": direct,
+                    "profit_after_advertising": int(sales["sales_profit"]) - direct,
+                }
+        return groups
 
     def sales_analysis_compare(
         self, workspace_id: int, periods: dict[str, tuple[str, str]],
@@ -721,6 +795,7 @@ class FinanceRepository:
                     "unassigned_amount": int(meta_product_attribution["unassigned_amount"]),
                     "brand_common_amount": int(meta_product_attribution["brand_common_amount"]),
                     "direct_product_amount": int(meta_product_attribution["direct_product_amount"]),
+                    "direct_product_group_amount": int(meta_product_attribution["direct_product_group_amount"]),
                     "unavailable_amount": int(meta_product_attribution["unavailable_amount"]),
                 },
                 "currency_complete": currency_complete,
@@ -882,6 +957,7 @@ class FinanceRepository:
             "filters": {"brand_id": brand_id, "brand_name": brand["name"] if brand else None, "product_id": product_id, "product_name": product["name"] if product else None},
             "periods": result_periods,
             "products": list(products_by_id.values()),
+            "product_groups": self._product_group_analysis(workspace_id, periods, brand_id),
         }
 
     def import_if_empty(self, workspace_id: int, data: dict[str, Any]) -> dict[str, int]:

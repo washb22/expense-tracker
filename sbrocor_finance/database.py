@@ -11,7 +11,7 @@ from typing import Iterator
 from .config import get_finance_database_path
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -38,6 +38,16 @@ CREATE TABLE IF NOT EXISTS brand (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(workspace_id, name)
 );
+CREATE TABLE IF NOT EXISTS product_group (
+    id INTEGER PRIMARY KEY,
+    workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE RESTRICT,
+    brand_id INTEGER NOT NULL REFERENCES brand(id) ON DELETE RESTRICT,
+    name TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(workspace_id, brand_id, name)
+);
 CREATE TABLE IF NOT EXISTS rule (
     id INTEGER PRIMARY KEY,
     workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE RESTRICT,
@@ -52,6 +62,7 @@ CREATE TABLE IF NOT EXISTS product (
     cost_price INTEGER NOT NULL,
     category TEXT,
     brand_id INTEGER REFERENCES brand(id) ON DELETE SET NULL,
+    product_group_id INTEGER REFERENCES product_group(id) ON DELETE RESTRICT,
     created_at TEXT
 );
 CREATE TABLE IF NOT EXISTS platform (
@@ -145,13 +156,15 @@ CREATE TABLE IF NOT EXISTS meta_ad_allocation (
     ad_account_connection_id INTEGER NOT NULL REFERENCES ad_account_connection(id) ON DELETE RESTRICT,
     ad_id TEXT NOT NULL,
     allocation_mode TEXT NOT NULL DEFAULT 'unassigned'
-        CHECK(allocation_mode IN ('unassigned','brand_common','product')),
+        CHECK(allocation_mode IN ('unassigned','brand_common','product','product_group')),
     product_id INTEGER REFERENCES product(id) ON DELETE RESTRICT,
+    product_group_id INTEGER REFERENCES product_group(id) ON DELETE RESTRICT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(workspace_id, ad_account_connection_id, ad_id),
-    CHECK((allocation_mode='product' AND product_id IS NOT NULL) OR
-          (allocation_mode!='product' AND product_id IS NULL))
+    CHECK((allocation_mode='product' AND product_id IS NOT NULL AND product_group_id IS NULL) OR
+          (allocation_mode='product_group' AND product_group_id IS NOT NULL AND product_id IS NULL) OR
+          (allocation_mode IN ('unassigned','brand_common') AND product_id IS NULL AND product_group_id IS NULL))
 );
 CREATE TABLE IF NOT EXISTS manual_marketing_spend (
     id TEXT PRIMARY KEY,
@@ -291,6 +304,9 @@ CREATE INDEX IF NOT EXISTS ix_marketing_spend_workspace_date ON marketing_spend(
 CREATE INDEX IF NOT EXISTS ix_marketing_spend_brand_date ON marketing_spend(workspace_id, brand_id, date);
 CREATE INDEX IF NOT EXISTS ix_meta_ad_allocation_connection ON meta_ad_allocation(workspace_id, ad_account_connection_id);
 CREATE INDEX IF NOT EXISTS ix_meta_ad_allocation_product ON meta_ad_allocation(workspace_id, product_id);
+CREATE INDEX IF NOT EXISTS ix_meta_ad_allocation_product_group ON meta_ad_allocation(workspace_id, product_group_id);
+CREATE INDEX IF NOT EXISTS ix_product_group_workspace_brand ON product_group(workspace_id, brand_id, active, name);
+CREATE INDEX IF NOT EXISTS ix_product_workspace_group ON product(workspace_id, product_group_id);
 CREATE INDEX IF NOT EXISTS ix_manual_spend_workspace_date ON manual_marketing_spend(workspace_id, date);
 CREATE INDEX IF NOT EXISTS ix_manual_spend_workspace_batch ON manual_marketing_spend(workspace_id, batch_id);
 CREATE INDEX IF NOT EXISTS ix_manual_spend_brand_product_date ON manual_marketing_spend(workspace_id, brand_id, product_id, date);
@@ -451,8 +467,10 @@ def _v8_migration_hook(_stage: str) -> None:
 
 def _is_v8_statement(statement: str) -> bool:
     normalized = " ".join(statement.lower().split())
-    return normalized.startswith("create table if not exists meta_ad_allocation") or normalized.startswith(
-        "create index if not exists ix_meta_ad_allocation"
+    return (
+        normalized.startswith("create table if not exists meta_ad_allocation")
+        or normalized.startswith("create index if not exists ix_meta_ad_allocation_connection ")
+        or normalized.startswith("create index if not exists ix_meta_ad_allocation_product ")
     )
 
 
@@ -468,6 +486,83 @@ def _migrate_v8(connection: sqlite3.Connection) -> None:
         _v8_migration_hook("after_ddl")
         _v8_migration_hook("before_version")
         connection.execute("INSERT OR IGNORE INTO schema_version(version) VALUES (8)")
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+
+
+def _v9_migration_hook(_stage: str) -> None:
+    """Fault-injection seam used by migration tests."""
+
+
+def _is_v9_statement(statement: str) -> bool:
+    normalized = " ".join(statement.lower().split())
+    return (
+        normalized.startswith("create table if not exists product_group")
+        or normalized.startswith("create index if not exists ix_product_group")
+        or normalized.startswith("create index if not exists ix_product_workspace_group")
+        or normalized.startswith("create index if not exists ix_meta_ad_allocation_product_group")
+    )
+
+
+def _migrate_v9(connection: sqlite3.Connection) -> None:
+    current = int(connection.execute("SELECT COALESCE(MAX(version),0) FROM schema_version").fetchone()[0])
+    if current >= 9:
+        return
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS product_group (
+               id INTEGER PRIMARY KEY,
+               workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE RESTRICT,
+               brand_id INTEGER NOT NULL REFERENCES brand(id) ON DELETE RESTRICT,
+               name TEXT NOT NULL,
+               active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+               created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+               updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+               UNIQUE(workspace_id,brand_id,name))"""
+        )
+        product_columns = {row[1] for row in connection.execute("PRAGMA table_info(product)")}
+        if "product_group_id" not in product_columns:
+            connection.execute(
+                "ALTER TABLE product ADD COLUMN product_group_id INTEGER REFERENCES product_group(id) ON DELETE RESTRICT"
+            )
+        allocation_columns = {row[1] for row in connection.execute("PRAGMA table_info(meta_ad_allocation)")}
+        if "product_group_id" not in allocation_columns:
+            connection.execute(
+                """CREATE TABLE meta_ad_allocation_v9 (
+                   id INTEGER PRIMARY KEY,
+                   workspace_id INTEGER NOT NULL REFERENCES workspace(id) ON DELETE RESTRICT,
+                   ad_account_connection_id INTEGER NOT NULL REFERENCES ad_account_connection(id) ON DELETE RESTRICT,
+                   ad_id TEXT NOT NULL,
+                   allocation_mode TEXT NOT NULL DEFAULT 'unassigned'
+                     CHECK(allocation_mode IN ('unassigned','brand_common','product','product_group')),
+                   product_id INTEGER REFERENCES product(id) ON DELETE RESTRICT,
+                   product_group_id INTEGER REFERENCES product_group(id) ON DELETE RESTRICT,
+                   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                   UNIQUE(workspace_id,ad_account_connection_id,ad_id),
+                   CHECK((allocation_mode='product' AND product_id IS NOT NULL AND product_group_id IS NULL) OR
+                         (allocation_mode='product_group' AND product_group_id IS NOT NULL AND product_id IS NULL) OR
+                         (allocation_mode IN ('unassigned','brand_common') AND product_id IS NULL AND product_group_id IS NULL)))"""
+            )
+            connection.execute(
+                """INSERT INTO meta_ad_allocation_v9
+                   (id,workspace_id,ad_account_connection_id,ad_id,allocation_mode,product_id,product_group_id,created_at,updated_at)
+                   SELECT id,workspace_id,ad_account_connection_id,ad_id,allocation_mode,product_id,NULL,created_at,updated_at
+                   FROM meta_ad_allocation"""
+            )
+            connection.execute("DROP TABLE meta_ad_allocation")
+            connection.execute("ALTER TABLE meta_ad_allocation_v9 RENAME TO meta_ad_allocation")
+        connection.execute("CREATE INDEX IF NOT EXISTS ix_product_group_workspace_brand ON product_group(workspace_id,brand_id,active,name)")
+        connection.execute("CREATE INDEX IF NOT EXISTS ix_product_workspace_group ON product(workspace_id,product_group_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS ix_meta_ad_allocation_connection ON meta_ad_allocation(workspace_id,ad_account_connection_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS ix_meta_ad_allocation_product ON meta_ad_allocation(workspace_id,product_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS ix_meta_ad_allocation_product_group ON meta_ad_allocation(workspace_id,product_group_id)")
+        _v9_migration_hook("after_ddl")
+        _v9_migration_hook("before_version")
+        connection.execute("INSERT OR IGNORE INTO schema_version(version) VALUES (9)")
         connection.commit()
     except Exception:
         connection.rollback()
@@ -495,7 +590,8 @@ def initialize_database(path: Path | None = None) -> Path:
         if existing:
             base_schema = ";\n".join(
                 statement for statement in _schema_statements(SCHEMA_SQL)
-                if not _is_v5_statement(statement) and not _is_v6_statement(statement) and not _is_v8_statement(statement)
+                if not _is_v5_statement(statement) and not _is_v6_statement(statement)
+                and not _is_v8_statement(statement) and not _is_v9_statement(statement)
             ) + ";"
             connection.executescript(base_schema)
         else:
@@ -507,6 +603,7 @@ def initialize_database(path: Path | None = None) -> Path:
             _migrate_v6(connection)
             _migrate_v7(connection)
             _migrate_v8(connection)
+            _migrate_v9(connection)
         else:
             connection.execute("INSERT OR IGNORE INTO schema_version(version) VALUES (?)", (SCHEMA_VERSION,))
             connection.commit()

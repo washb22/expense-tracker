@@ -19,12 +19,22 @@ class FinanceService:
 
     def create_resource(self, resource: str, workspace_id: int, payload: dict[str, Any]) -> dict[str, Any]:
         self.require_workspace(workspace_id)
-        if resource == "brands":
+        if resource in {"brands", "product-groups"}:
             payload = {**payload, "active": 1 if payload.get("active", True) else 0}
-        if resource == "products" and payload.get("brand_id") not in (None, ""):
-            brand = self.repository.get_resource("brands", workspace_id, str(payload["brand_id"]))
+        if resource == "product-groups":
+            brand = self.repository.get_resource("brands", workspace_id, str(payload.get("brand_id", "")))
             if not brand:
-                raise ValueError("product brand must belong to the same workspace")
+                raise ValueError("product group brand must belong to the same workspace")
+        if resource == "products":
+            brand = None
+            if payload.get("brand_id") not in (None, ""):
+                brand = self.repository.get_resource("brands", workspace_id, str(payload["brand_id"]))
+                if not brand:
+                    raise ValueError("product brand must belong to the same workspace")
+            if payload.get("product_group_id") not in (None, ""):
+                group = self.repository.get_resource("product-groups", workspace_id, str(payload["product_group_id"]))
+                if not group or not brand or int(group["brand_id"]) != int(brand["id"]):
+                    raise ValueError("product group must belong to the product brand")
         if resource == "ad-accounts":
             brand = self.repository.get_resource("brands", workspace_id, str(payload.get("brand_id", "")))
             if not brand:
