@@ -1451,10 +1451,11 @@ def sync_ad_account(connection_id: int):
                     "campaign_name=excluded.campaign_name,adset_name=excluded.adset_name,ad_name=excluded.ad_name,spend=excluded.spend,impressions=excluded.impressions,clicks=excluded.clicks,ctr=excluded.ctr,cpc=excluded.cpc,cpm=excluded.cpm,conversions=excluded.conversions,conversion_value=excluded.conversion_value,roas=excluded.roas,ad_account_connection_id=excluded.ad_account_connection_id,brand_id=excluded.brand_id",
                     (workspace_id,day,"meta",item.get("campaign_id"),item.get("campaign_name"),item.get("adset_id"),item.get("adset_name"),item.get("ad_id"),item.get("ad_name"),spend,int(item.get("impressions",0)),int(item.get("clicks",0)),float(item.get("ctr",0)),float(item.get("cpc",0)),float(item.get("cpm",0)),conversions,revenue,revenue/spend if spend else 0,connection_id,account["brand_id"]),
                 )
-            cursor = start_day; synced_days = 0
+            cursor = start_day; synced_days = 0; synced_amount_krw = 0
             while cursor <= end_day:
                 day = cursor.isoformat(); original = daily_spend.get(day, 0.0); currency = str(account["currency"]).upper()
                 amount_krw = round(original) if currency == "KRW" else None
+                if amount_krw is not None: synced_amount_krw += amount_krw
                 external_key = f"meta:{account['account_id']}:{day}:account"
                 connection.execute(
                     "INSERT INTO marketing_spend(workspace_id,ad_account_connection_id,brand_id,product_id,date,channel,original_amount,currency,fx_rate,amount_krw,source,external_key) "
@@ -1474,6 +1475,7 @@ def sync_ad_account(connection_id: int):
         end_date=end,
         currency=account["currency"],
         currency_converted=str(account["currency"]).upper()=="KRW",
+        amount_krw=synced_amount_krw if str(account["currency"]).upper()=="KRW" else None,
     )
 
 

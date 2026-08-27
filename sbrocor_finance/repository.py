@@ -7,10 +7,15 @@ import uuid
 import math
 from decimal import Decimal
 from fractions import Fraction
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Iterable
+from zoneinfo import ZoneInfo
 
 MARKETING_CHANNELS = ("Meta", "네이버", "Google", "카카오", "바이럴", "인플루언서", "체험단", "대행사", "기타")
+
+
+def _kst_today() -> date:
+    return datetime.now(ZoneInfo("Asia/Seoul")).date()
 
 RESOURCE_CONFIG = {
     "transactions": {
@@ -674,13 +679,15 @@ class FinanceRepository:
                 "AND ms.ad_account_connection_id=ac.id AND ms.source!='naver_api' AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=?))",
                 [workspace_id, *( [brand_id] if brand_id is not None else [] ), start_date, end_date],
             ).fetchone()[0])
+            coverage_today = _kst_today().isoformat()
             meta_synced_rows = int(self.connection.execute(
                 "SELECT COUNT(*) FROM (SELECT ms.ad_account_connection_id,substr(ms.date,1,10) sync_date "
                 "FROM marketing_spend ms JOIN ad_account_connection ac ON ac.id=ms.ad_account_connection_id "
                 "WHERE ms.workspace_id=? AND ac.platform='meta' AND ms.source!='naver_api' AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=?" +
+                " AND substr(ms.date,1,10)<>?" +
                 (" AND ms.brand_id=?" if brand_id is not None else "") +
                 " GROUP BY ms.ad_account_connection_id,substr(ms.date,1,10))",
-                [workspace_id, start_date, end_date, *( [brand_id] if brand_id is not None else [] )],
+                [workspace_id, start_date, end_date, coverage_today, *( [brand_id] if brand_id is not None else [] )],
             ).fetchone()[0])
             naver_accounts = int(self.connection.execute(
                 "SELECT COUNT(*) FROM naver_account_connection na WHERE na.workspace_id=? AND "
@@ -690,14 +697,15 @@ class FinanceRepository:
             ).fetchone()[0])
             naver_synced_rows = int(self.connection.execute(
                 "SELECT COUNT(*) FROM naver_account_sync_day sd JOIN naver_account_connection na ON na.id=sd.naver_account_connection_id "
-                "AND na.workspace_id=sd.workspace_id WHERE sd.workspace_id=? AND sd.date>=? AND sd.date<=?",
-                (workspace_id, start_date, end_date),
+                "AND na.workspace_id=sd.workspace_id WHERE sd.workspace_id=? AND sd.date>=? AND sd.date<=? AND sd.date<>?",
+                (workspace_id, start_date, end_date, coverage_today),
             ).fetchone()[0])
             period_dates = []
             coverage_cursor = date.fromisoformat(start_date)
             coverage_end = date.fromisoformat(end_date)
             while coverage_cursor <= coverage_end:
-                period_dates.append(coverage_cursor.isoformat())
+                if coverage_cursor.isoformat() != coverage_today:
+                    period_dates.append(coverage_cursor.isoformat())
                 coverage_cursor += timedelta(days=1)
             meta_account_rows = [dict(row) for row in self.connection.execute(
                 "SELECT ac.id,ac.account_name FROM ad_account_connection ac WHERE ac.workspace_id=? AND ac.platform='meta'" +
@@ -711,10 +719,10 @@ class FinanceRepository:
                     "SELECT ms.ad_account_connection_id,substr(ms.date,1,10) sync_date "
                     "FROM marketing_spend ms JOIN ad_account_connection ac ON ac.id=ms.ad_account_connection_id "
                     "WHERE ms.workspace_id=? AND ac.platform='meta' AND ms.source!='naver_api' "
-                    "AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=?" +
+                    "AND substr(ms.date,1,10)>=? AND substr(ms.date,1,10)<=? AND substr(ms.date,1,10)<>?" +
                     (" AND ms.brand_id=?" if brand_id is not None else "") +
                     " GROUP BY ms.ad_account_connection_id,substr(ms.date,1,10)",
-                    [workspace_id, start_date, end_date, *( [brand_id] if brand_id is not None else [] )],
+                    [workspace_id, start_date, end_date, coverage_today, *( [brand_id] if brand_id is not None else [] )],
                 )
             }
             naver_account_rows = [dict(row) for row in self.connection.execute(
@@ -727,8 +735,8 @@ class FinanceRepository:
                 (int(row[0]), str(row[1])) for row in self.connection.execute(
                     "SELECT sd.naver_account_connection_id,sd.date FROM naver_account_sync_day sd "
                     "JOIN naver_account_connection na ON na.id=sd.naver_account_connection_id "
-                    "AND na.workspace_id=sd.workspace_id WHERE sd.workspace_id=? AND sd.date>=? AND sd.date<=?",
-                    (workspace_id, start_date, end_date),
+                    "AND na.workspace_id=sd.workspace_id WHERE sd.workspace_id=? AND sd.date>=? AND sd.date<=? AND sd.date<>?",
+                    (workspace_id, start_date, end_date, coverage_today),
                 )
             }
             missing_account_days = [
@@ -775,8 +783,9 @@ class FinanceRepository:
                     "AND allocation_mode='product' AND product_id=?",
                     [workspace_id, start_date, end_date, product_id],
                 ).fetchone()[0])
-            meta_expected = days * meta_accounts
-            naver_expected = days * naver_accounts
+            coverage_days = len(period_dates)
+            meta_expected = coverage_days * meta_accounts
+            naver_expected = coverage_days * naver_accounts
             expected_sync_rows = meta_expected + naver_expected
             synced_rows = meta_synced_rows + naver_synced_rows
             analysis_accounts = meta_accounts + naver_accounts

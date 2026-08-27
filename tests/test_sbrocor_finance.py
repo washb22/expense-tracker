@@ -8,6 +8,7 @@ import time
 import unittest
 import uuid
 from contextlib import closing
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1208,6 +1209,51 @@ class FinanceApiTest(unittest.TestCase):
         }])
         self.assertFalse(incomplete["spend_analysis_ready"])
         self.assertIsNone(incomplete["actual_advertising_spend"])
+
+    def test_sales_analysis_excludes_only_kst_today_from_required_coverage(self):
+        self.create_workspace(1)
+        brand = self.request("POST", "/api/sbrocor/finance/v1/brands?workspace_id=1", {"name": "오늘 제외"}).json
+        meta = self.request("POST", "/api/sbrocor/finance/v1/ad-accounts?workspace_id=1", {
+            "brand_id": brand["id"], "platform": "meta", "account_id": "act_today",
+            "account_name": "Meta 오늘", "currency": "KRW", "credential_key": "TODAY",
+        }).json
+        naver = self.request("POST", "/api/sbrocor/finance/v1/naver-accounts?workspace_id=1", {
+            "customer_id": "827", "account_name": "Naver 오늘", "credential_key": "TODAY",
+        }).json
+        with closing(connect()) as connection:
+            connection.execute(
+                "INSERT INTO marketing_spend(workspace_id,ad_account_connection_id,brand_id,date,channel,original_amount,currency,amount_krw,source,external_key) "
+                "VALUES (1,?,?,?,'Meta',100,'KRW',100,'meta_api','meta:today:2026-08-26')",
+                (meta["id"], brand["id"], "2026-08-26"),
+            )
+            connection.execute(
+                "INSERT INTO naver_account_sync_day(workspace_id,naver_account_connection_id,date,total_amount_krw) VALUES (1,?,'2026-08-26',200)",
+                (naver["id"],),
+            )
+            connection.commit()
+
+        with patch("sbrocor_finance.repository._kst_today", return_value=date(2026, 8, 27)):
+            current = self.request(
+                "GET", "/api/sbrocor/finance/v1/sales-analysis/compare?workspace_id=1"
+                "&a_start=2026-08-26&a_end=2026-08-27&b_start=2026-08-26&b_end=2026-08-27",
+            ).json["periods"]["a"]["totals"]["spend_coverage"]
+            today_only = self.request(
+                "GET", "/api/sbrocor/finance/v1/sales-analysis/compare?workspace_id=1"
+                "&a_start=2026-08-27&a_end=2026-08-27&b_start=2026-08-27&b_end=2026-08-27",
+            ).json["periods"]["a"]["totals"]["spend_coverage"]
+            historical = self.request(
+                "GET", "/api/sbrocor/finance/v1/sales-analysis/compare?workspace_id=1"
+                "&a_start=2026-08-25&a_end=2026-08-26&b_start=2026-08-25&b_end=2026-08-26",
+            ).json["periods"]["a"]["totals"]["spend_coverage"]
+
+        self.assertTrue(current["complete"])
+        self.assertEqual(current["account_days_expected"], 2)
+        self.assertEqual(current["account_days_synced"], 2)
+        self.assertEqual(current["missing_account_days"], [])
+        self.assertTrue(today_only["complete"])
+        self.assertEqual(today_only["account_days_expected"], 0)
+        self.assertFalse(historical["complete"])
+        self.assertEqual({item["date"] for item in historical["missing_account_days"]}, {"2026-08-25"})
 
     def test_meta_sync_follows_all_pages_and_remains_idempotent(self):
         self.create_workspace(1)
