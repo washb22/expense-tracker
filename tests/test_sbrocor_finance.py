@@ -544,7 +544,51 @@ class FinanceApiTest(unittest.TestCase):
         self.assertEqual(applied.status_code, 200, applied.get_data(as_text=True))
         imported = self.request("GET", "/api/sbrocor/finance/v1/sales?workspace_id=1")
         self.assertEqual(len(imported.json["items"]), 1)
+
         self.assertEqual(imported.json["items"][0]["total_selling_amount"], 2000)
+
+    def test_sale_file_order_survives_uuid_sort_pagination_and_append(self):
+        import io
+        from types import SimpleNamespace
+        import pandas as pd
+        from werkzeug.test import EnvironBuilder
+
+        for workspace_id, extension in enumerate(("csv", "xlsx"), 1):
+            with self.subTest(extension=extension):
+                self.create_workspace(workspace_id)
+                for name in ("등원한끼", "석류정", "배도라지즙"):
+                    self.request("POST", f"/api/sbrocor/finance/v1/products?workspace_id={workspace_id}", {"name": name, "cost_price": 100})
+                self.request("POST", f"/api/sbrocor/finance/v1/platforms?workspace_id={workspace_id}", {"name": "채널", "commission_rate": 10})
+                frame = pd.DataFrame({"판매일": ["2026-10-01"] * 4 + ["2026-10-02"], "제품명": ["등원한끼"] * 3 + ["석류정", "배도라지즙"], "판매채널": ["채널"] * 5, "실제판매가": [1000, 2000, 3000, 4000, 5000], "수량": [1] * 5})
+                data = io.BytesIO()
+                if extension == "xlsx":
+                    frame.to_excel(data, index=False)
+                else:
+                    data.write(frame.to_csv(index=False).encode())
+                data.seek(0)
+                builder = EnvironBuilder(method="POST", data={"file": (data, f"sales.{extension}"), "mode": "append", "dry_run": "false"})
+                environment = builder.get_environ()
+                body = environment["wsgi.input"].read()
+                ids = iter([f"{workspace_id}-{index}" for index in (5, 4, 3, 2, 1)])
+                with patch("sbrocor_finance.routes.uuid", SimpleNamespace(uuid4=lambda: next(ids))):
+                    response = self.request_bytes("POST", f"/api/sbrocor/finance/v1/sales/import?workspace_id={workspace_id}", body, environment["CONTENT_TYPE"])
+                self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+                expected = [5000, 1000, 2000, 3000, 4000]
+                path = f"/api/sbrocor/finance/v1/sales?workspace_id={workspace_id}"
+                for query in ("", "&month=2026-10", "&start_date=2026-10-01&end_date=2026-10-02"):
+                    items = self.request("GET", path + query).json["items"]
+                    self.assertEqual([item["total_selling_amount"] for item in items], expected)
+                    self.assertEqual([item["net_profit"] for item in items], [4400, 800, 1700, 2600, 3500])
+                paginated = []
+                for page in (1, 2, 3):
+                    paginated.extend(self.request("GET", path + f"&page_size=2&page={page}").json["items"])
+                self.assertEqual([item["total_selling_amount"] for item in paginated], expected)
+                csv = "판매일,제품명,판매채널,실제판매가,수량\n2026-10-01,등원한끼,채널,6000,1\n"
+                body, content_type = self.multipart_import("append.csv", csv, "append", False)
+                self.assertEqual(self.request_bytes("POST", f"/api/sbrocor/finance/v1/sales/import?workspace_id={workspace_id}", body, content_type).status_code, 200)
+                self.assertEqual([item["total_selling_amount"] for item in self.request("GET", path).json["items"]], expected + [6000])
+                with closing(connect()) as connection:
+                    self.assertEqual([item["total_selling_amount"] for item in FinanceRepository(connection).list_resource("sales", workspace_id, "2026-10")], expected + [6000])
 
     def test_meta_settings_never_persist_or_return_token(self):
         self.create_workspace(1)

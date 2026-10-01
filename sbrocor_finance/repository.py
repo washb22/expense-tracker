@@ -119,13 +119,15 @@ class FinanceRepository:
 
     def list_resource(self, resource: str, workspace_id: int, month: str | None = None) -> list[dict[str, Any]]:
         table = RESOURCE_CONFIG[resource]["table"]
+        # Sale UUIDs are random; SQLite rowid preserves the file's insertion order.
+        order = "date DESC, rowid ASC" if resource == "sales" else "date DESC, id"
         if month and "date" in RESOURCE_CONFIG[resource]["fields"]:
             return [dict(row) for row in self.connection.execute(
-                f"SELECT * FROM {table} WHERE workspace_id=? AND substr(date,1,7)=? ORDER BY date DESC, id",
+                f"SELECT * FROM {table} WHERE workspace_id=? AND substr(date,1,7)=? ORDER BY {order}",
                 (workspace_id, month),
             )]
         return [dict(row) for row in self.connection.execute(
-            f"SELECT * FROM {table} WHERE workspace_id=? ORDER BY id", (workspace_id,)
+            f"SELECT * FROM {table} WHERE workspace_id=? ORDER BY {order if resource == 'sales' else 'id'}", (workspace_id,)
         )]
 
     def available_months(self, workspace_id: int, resource: str) -> list[str]:
@@ -171,6 +173,8 @@ class FinanceRepository:
         page_size = max(1, min(int(page_size), 200))
         page = max(1, int(page))
         order = "date DESC, id DESC" if "date" in config["fields"] else "id DESC"
+        if resource == "sales":
+            order = "date DESC, rowid ASC"
         select = "*"
         if resource == "products":
             select = "product.*, brand.name brand_name, product_group.name product_group_name, (SELECT COUNT(*) FROM sale WHERE sale.workspace_id=product.workspace_id AND sale.product_id=product.id) sale_count"
