@@ -81,6 +81,13 @@ RESOURCE_CONFIG = {
 }
 
 
+# Group products across separate imports; keep source order within each product.
+SALES_ORDER = (
+    "date DESC, (SELECT name FROM product WHERE product.id=sale.product_id "
+    "AND product.workspace_id=sale.workspace_id) COLLATE NOCASE ASC, product_id ASC, rowid ASC"
+)
+
+
 class FinanceRepository:
     def __init__(self, connection: sqlite3.Connection):
         self.connection = connection
@@ -119,8 +126,7 @@ class FinanceRepository:
 
     def list_resource(self, resource: str, workspace_id: int, month: str | None = None) -> list[dict[str, Any]]:
         table = RESOURCE_CONFIG[resource]["table"]
-        # Sale UUIDs are random; SQLite rowid preserves the file's insertion order.
-        order = "date DESC, rowid ASC" if resource == "sales" else "date DESC, id"
+        order = SALES_ORDER if resource == "sales" else "date DESC, id"
         if month and "date" in RESOURCE_CONFIG[resource]["fields"]:
             return [dict(row) for row in self.connection.execute(
                 f"SELECT * FROM {table} WHERE workspace_id=? AND substr(date,1,7)=? ORDER BY {order}",
@@ -174,7 +180,7 @@ class FinanceRepository:
         page = max(1, int(page))
         order = "date DESC, id DESC" if "date" in config["fields"] else "id DESC"
         if resource == "sales":
-            order = "date DESC, rowid ASC"
+            order = SALES_ORDER
         select = "*"
         if resource == "products":
             select = "product.*, brand.name brand_name, product_group.name product_group_name, (SELECT COUNT(*) FROM sale WHERE sale.workspace_id=product.workspace_id AND sale.product_id=product.id) sale_count"
